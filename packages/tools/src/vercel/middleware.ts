@@ -1,51 +1,73 @@
 import Supermemory from "supermemory"
 import {
 	addConversation,
+	type ContentPart,
 	type ConversationMessage,
+	toConversationImageUrl,
 } from "../conversations-client"
-import { createLogger, type Logger } from "./logger"
 import {
-	type LanguageModelCallOptions,
-	type LanguageModelStreamPart,
-	type OutputContentItem,
-	getLastUserMessage,
-	filterOutSupermemories,
-} from "./util"
-import {
-	addSystemPrompt,
+	createLogger,
 	normalizeBaseUrl,
+	MemoryCache,
+	buildMemoriesText,
+	type Logger,
 	type PromptTemplate,
-} from "./memory-prompt"
+	type MemoryMode,
+} from "../shared"
+import { type LanguageModelCallOptions, getLastUserMessage } from "./util"
+import { extractQueryText, injectMemoriesIntoParams } from "./memory-prompt"
 
-export const getConversationContent = (params: LanguageModelCallOptions) => {
-	return params.prompt
-		.filter((msg) => msg.role !== "system" && msg.role !== "tool")
-		.map((msg) => {
-			const role = msg.role === "user" ? "User" : "Assistant"
+const safeJsonStringify = (value: unknown): string => {
+	try {
+		return JSON.stringify(value) ?? ""
+	} catch {
+		return ""
+	}
+}
 
-			if (typeof msg.content === "string") {
-				return `${role}: ${filterOutSupermemories(msg.content)}`
-			}
+const serializeToolOutput = (output: unknown): string => {
+	if (typeof output === "string") return output
+	if (typeof output !== "object" || output === null) {
+		return safeJsonStringify(output)
+	}
 
-			const content = msg.content
-				.filter((c) => c.type === "text")
-				.map((c) => (c.type === "text" ? filterOutSupermemories(c.text) : ""))
-				.join(" ")
-			return `${role}: ${content}`
-		})
-		.join("\n\n")
+	const wrapper = output as {
+		type?: unknown
+		value?: unknown
+		reason?: unknown
+	}
+
+	if (
+		(wrapper.type === "text" || wrapper.type === "error-text") &&
+		typeof wrapper.value === "string"
+	) {
+		return wrapper.value
+	}
+	if (
+		wrapper.type === "json" ||
+		wrapper.type === "error-json" ||
+		wrapper.type === "content"
+	) {
+		return safeJsonStringify(wrapper.value)
+	}
+	if (wrapper.type === "execution-denied") {
+		return typeof wrapper.reason === "string" && wrapper.reason
+			? wrapper.reason
+			: "Tool execution denied"
+	}
+
+	return safeJsonStringify(output)
 }
 
 export const convertToConversationMessages = (
 	params: LanguageModelCallOptions,
 	assistantResponseText: string,
+	includeToolCalls = false,
 ): ConversationMessage[] => {
 	const messages: ConversationMessage[] = []
 
 	for (const msg of params.prompt) {
-		if (msg.role === "system") {
-			continue
-		}
+		if (msg.role === "system") continue
 
 		if (typeof msg.content === "string") {
 			if (msg.content) {
@@ -54,36 +76,66 @@ export const convertToConversationMessages = (
 					content: msg.content,
 				})
 			}
-		} else {
-			const contentParts = msg.content
-				.map((c) => {
-					if (c.type === "text" && c.text) {
-						return {
-							type: "text" as const,
-							text: c.text,
-						}
-					}
-					if (
-						c.type === "file" &&
-						typeof c.data === "string" &&
-						c.mediaType.startsWith("image/")
-					) {
-						return {
-							type: "image_url" as const,
-							image_url: { url: c.data },
-						}
-					}
-					return null
-				})
-				.filter((part) => part !== null)
+			continue
+		}
 
-			if (contentParts.length > 0) {
+		let contentParts: ContentPart[] = []
+		let toolCalls: NonNullable<ConversationMessage["tool_calls"]> = []
+
+		// Flush any pending assistant/user content accumulated so far. Called
+		// before each tool-result so a tool result never jumps ahead of the
+		// text/tool-calls that preceded it (or behind text that follows it),
+		// preserving the original chronology for memory extraction.
+		const flushContent = () => {
+			if (contentParts.length > 0 || toolCalls.length > 0) {
 				messages.push({
 					role: msg.role as "user" | "assistant" | "tool",
-					content: contentParts,
+					content: contentParts.length > 0 ? contentParts : "",
+					...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+				})
+				contentParts = []
+				toolCalls = []
+			}
+		}
+
+		for (const content of msg.content) {
+			if (content.type === "text" && content.text) {
+				contentParts.push({
+					type: "text",
+					text: content.text,
+				})
+			} else if (
+				content.type === "file" &&
+				content.mediaType.startsWith("image/")
+			) {
+				const url = toConversationImageUrl(content.data, content.mediaType)
+				if (url) {
+					contentParts.push({ type: "image_url", imageUrl: { url } })
+				}
+			} else if (
+				includeToolCalls &&
+				content.type === "tool-call" &&
+				msg.role === "assistant"
+			) {
+				toolCalls.push({
+					id: content.toolCallId,
+					type: "function",
+					function: {
+						name: content.toolName,
+						arguments: safeJsonStringify(content.input) || "{}",
+					},
+				})
+			} else if (includeToolCalls && content.type === "tool-result") {
+				flushContent()
+				messages.push({
+					role: "tool",
+					content: serializeToolOutput(content.output),
+					tool_call_id: content.toolCallId,
 				})
 			}
 		}
+
+		flushContent()
 	}
 
 	if (assistantResponseText) {
@@ -97,58 +149,36 @@ export const convertToConversationMessages = (
 }
 
 export const saveMemoryAfterResponse = async (
-	client: Supermemory,
+	_client: Supermemory,
 	containerTag: string,
-	conversationId: string | undefined,
+	customId: string,
 	assistantResponseText: string,
 	params: LanguageModelCallOptions,
 	logger: Logger,
 	apiKey: string,
 	baseUrl: string,
+	includeToolCalls = false,
 ): Promise<void> => {
-	const customId = conversationId ? `conversation:${conversationId}` : undefined
-
 	try {
-		if (customId && conversationId) {
-			const conversationMessages = convertToConversationMessages(
-				params,
-				assistantResponseText,
-			)
+		const conversationMessages = convertToConversationMessages(
+			params,
+			assistantResponseText,
+			includeToolCalls,
+		)
 
-			const response = await addConversation({
-				conversationId,
-				messages: conversationMessages,
-				containerTags: [containerTag],
-				apiKey,
-				baseUrl,
-			})
-
-			logger.info("Conversation saved successfully via /v4/conversations", {
-				containerTag,
-				conversationId,
-				messageCount: conversationMessages.length,
-				responseId: response.id,
-			})
-			return
-		}
-
-		const userMessage = getLastUserMessage(params)
-		const content = conversationId
-			? `${getConversationContent(params)} \n\n Assistant: ${assistantResponseText}`
-			: `User: ${userMessage} \n\n Assistant: ${assistantResponseText}`
-
-		const response = await client.memories.add({
-			content,
+		const response = await addConversation({
+			conversationId: customId,
+			messages: conversationMessages,
 			containerTags: [containerTag],
-			customId,
+			apiKey,
+			baseUrl,
 		})
 
-		logger.info("Memory saved successfully via /v3/documents", {
+		logger.info("Conversation saved successfully via /v4/conversations", {
 			containerTag,
 			customId,
-			content,
-			contentLength: content.length,
-			memoryId: response.id,
+			messageCount: conversationMessages.length,
+			responseId: response.id,
 		})
 	} catch (error) {
 		logger.error("Error saving memory", {
@@ -160,13 +190,13 @@ export const saveMemoryAfterResponse = async (
 /**
  * Configuration options for the Supermemory middleware.
  */
-export interface SupermemoryMiddlewareOptions {
+interface SupermemoryMiddlewareOptions {
 	/** Container tag/identifier for memory search (e.g., user ID, project ID) */
 	containerTag: string
 	/** Supermemory API key */
 	apiKey: string
-	/** Optional conversation ID to group messages for contextual memory generation */
-	conversationId?: string
+	/** Custom ID to group messages into a single document. Required. */
+	customId: string
 	/** Enable detailed logging of memory search and injection */
 	verbose?: boolean
 	/**
@@ -175,7 +205,7 @@ export interface SupermemoryMiddlewareOptions {
 	 * - "query": Searches memories based on semantic similarity to the user's message
 	 * - "full": Combines both profile and query-based results
 	 */
-	mode?: "profile" | "query" | "full"
+	mode?: MemoryMode
 	/**
 	 * Memory persistence mode:
 	 * - "always": Automatically save conversations as memories
@@ -184,20 +214,35 @@ export interface SupermemoryMiddlewareOptions {
 	addMemory?: "always" | "never"
 	/** Custom Supermemory API base URL */
 	baseUrl?: string
+	/**
+	 * Persist assistant tool calls and tool results as part of the saved
+	 * conversation. Off by default: tool payloads are often large and
+	 * low-signal, and would pollute memory extraction.
+	 */
+	includeToolCalls?: boolean
 	/** Custom function to format memory data into the system prompt */
 	promptTemplate?: PromptTemplate
+	/** Max wait (ms) for the pre-LLM `/v4/profile` retrieval. Omit for no limit (e.g. tests). `withSupermemory` sets this internally. */
+	memoryRetrievalTimeoutMs?: number
 }
 
-export interface SupermemoryMiddlewareContext {
+interface SupermemoryMiddlewareContext {
 	client: Supermemory
 	logger: Logger
 	containerTag: string
-	conversationId?: string
-	mode: "profile" | "query" | "full"
+	customId: string
+	mode: MemoryMode
 	addMemory: "always" | "never"
+	includeToolCalls: boolean
 	normalizedBaseUrl: string
 	apiKey: string
 	promptTemplate?: PromptTemplate
+	memoryRetrievalTimeoutMs?: number
+	/**
+	 * Per-turn memory cache. Stores the injected memories string for each
+	 * user turn (keyed by turnKey) to avoid redundant API calls during tool-call
+	 */
+	memoryCache: MemoryCache<string>
 }
 
 export const createSupermemoryContext = (
@@ -206,12 +251,14 @@ export const createSupermemoryContext = (
 	const {
 		containerTag,
 		apiKey,
-		conversationId,
+		customId,
 		verbose = false,
 		mode = "profile",
-		addMemory = "never",
+		addMemory = "always",
 		baseUrl,
+		includeToolCalls = false,
 		promptTemplate,
+		memoryRetrievalTimeoutMs,
 	} = options
 
 	const logger = createLogger(verbose)
@@ -228,13 +275,42 @@ export const createSupermemoryContext = (
 		client,
 		logger,
 		containerTag,
-		conversationId,
+		customId,
 		mode,
 		addMemory,
+		includeToolCalls,
 		normalizedBaseUrl,
 		apiKey,
 		promptTemplate,
+		...(memoryRetrievalTimeoutMs !== undefined
+			? { memoryRetrievalTimeoutMs }
+			: {}),
+		memoryCache: new MemoryCache<string>(),
 	}
+}
+
+/**
+ * Generates a cache key for the current turn based on context and user message.
+ * Uses the shared MemoryCache.makeTurnKey implementation.
+ */
+const makeTurnKey = (
+	ctx: SupermemoryMiddlewareContext,
+	userMessage: string,
+): string => {
+	return MemoryCache.makeTurnKey(
+		ctx.containerTag,
+		ctx.customId,
+		ctx.mode,
+		userMessage,
+	)
+}
+
+/**
+ * Checks if this is a new user turn (last message is from user)
+ */
+const isNewUserTurn = (params: LanguageModelCallOptions): boolean => {
+	const lastMessage = params.prompt.at(-1)
+	return lastMessage?.role === "user"
 }
 
 export const transformParamsWithMemory = async (
@@ -245,27 +321,66 @@ export const transformParamsWithMemory = async (
 
 	if (ctx.mode !== "profile") {
 		if (!userMessage) {
-			ctx.logger.debug("No user message found, skipping memory search")
-			return params
+			ctx.logger.debug(
+				"No user message found, skipping memory search and clearing stale context",
+			)
+			return injectMemoriesIntoParams(params, "", ctx.logger)
 		}
+	}
+
+	const turnKey = makeTurnKey(ctx, userMessage || "")
+	const isNewTurn = isNewUserTurn(params)
+
+	// Check if we can use cached memories
+	const cachedMemories = ctx.memoryCache.get(turnKey)
+	if (!isNewTurn && cachedMemories) {
+		ctx.logger.debug("Using cached memories: ", {
+			turnKey,
+		})
+		return injectMemoriesIntoParams(params, cachedMemories, ctx.logger)
 	}
 
 	ctx.logger.info("Starting memory search", {
 		containerTag: ctx.containerTag,
-		conversationId: ctx.conversationId,
+		customId: ctx.customId,
 		mode: ctx.mode,
+		isNewTurn,
+		cacheHit: false,
 	})
 
-	const transformedParams = await addSystemPrompt(
-		params,
-		ctx.containerTag,
-		ctx.logger,
-		ctx.mode,
-		ctx.normalizedBaseUrl,
-		ctx.apiKey,
-		ctx.promptTemplate,
-	)
-	return transformedParams
+	const queryText = extractQueryText(params, ctx.mode)
+
+	let fetchSignal: AbortSignal | undefined
+	let timeoutId: ReturnType<typeof setTimeout> | undefined
+	const timeoutMs = ctx.memoryRetrievalTimeoutMs
+	if (timeoutMs !== undefined && timeoutMs > 0) {
+		const controller = new AbortController()
+		fetchSignal = controller.signal
+		timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+	}
+
+	let memories: string
+	try {
+		memories = await buildMemoriesText({
+			containerTag: ctx.containerTag,
+			queryText,
+			mode: ctx.mode,
+			baseUrl: ctx.normalizedBaseUrl,
+			apiKey: ctx.apiKey,
+			logger: ctx.logger,
+			promptTemplate: ctx.promptTemplate,
+			...(fetchSignal ? { signal: fetchSignal } : {}),
+		})
+	} finally {
+		if (timeoutId !== undefined) {
+			clearTimeout(timeoutId)
+		}
+	}
+
+	ctx.memoryCache.set(turnKey, memories)
+	ctx.logger.debug("Cached memories for turn", { turnKey })
+
+	return injectMemoriesIntoParams(params, memories, ctx.logger)
 }
 
 export const extractAssistantResponseText = (content: unknown[]): string => {
@@ -273,47 +388,3 @@ export const extractAssistantResponseText = (content: unknown[]): string => {
 		.map((item) => (item.type === "text" ? item.text || "" : ""))
 		.join("")
 }
-
-export const createStreamTransform = (
-	ctx: SupermemoryMiddlewareContext,
-	params: LanguageModelCallOptions,
-): {
-	transform: TransformStream<LanguageModelStreamPart, LanguageModelStreamPart>
-	getGeneratedText: () => string
-} => {
-	let generatedText = ""
-
-	const transform = new TransformStream<
-		LanguageModelStreamPart,
-		LanguageModelStreamPart
-	>({
-		transform(chunk, controller) {
-			if (chunk.type === "text-delta") {
-				generatedText += chunk.delta
-			}
-			controller.enqueue(chunk)
-		},
-		flush: async () => {
-			const userMessage = getLastUserMessage(params)
-			if (ctx.addMemory === "always" && userMessage && userMessage.trim()) {
-				saveMemoryAfterResponse(
-					ctx.client,
-					ctx.containerTag,
-					ctx.conversationId,
-					generatedText,
-					params,
-					ctx.logger,
-					ctx.apiKey,
-					ctx.normalizedBaseUrl,
-				)
-			}
-		},
-	})
-
-	return {
-		transform,
-		getGeneratedText: () => generatedText,
-	}
-}
-
-export { createLogger, type Logger, type OutputContentItem }

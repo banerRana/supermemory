@@ -25,22 +25,28 @@ Example:
     ```
 """
 
-from .service import SupermemoryPipecatService
+from importlib.metadata import PackageNotFoundError, version
+
 from .exceptions import (
-    SupermemoryPipecatError,
+    APIError,
     ConfigurationError,
     MemoryRetrievalError,
     MemoryStorageError,
-    APIError,
     NetworkError,
+    SupermemoryPipecatError,
 )
+from .service import SupermemoryPipecatService
 from .utils import (
-    get_last_user_message,
     deduplicate_memories,
     format_memories_to_text,
+    get_last_user_message,
 )
 
-__version__ = "0.1.0"
+try:
+    __version__ = version("supermemory-pipecat")
+except PackageNotFoundError:
+    # Source-tree fallback; built wheels always use package metadata above.
+    __version__ = "0.1.3"
 
 __all__ = [
     # Main service

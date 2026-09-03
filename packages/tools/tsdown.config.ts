@@ -6,6 +6,8 @@ export default defineConfig({
 		"src/ai-sdk.ts",
 		"src/claude-memory.ts",
 		"src/openai/index.ts",
+		"src/mastra.ts",
+		"src/voltagent/index.ts",
 	],
 	format: "esm",
 	sourcemap: false,

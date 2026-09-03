@@ -6,7 +6,6 @@ import {
 } from "../utils/api"
 import {
 	CONTAINER_TAGS,
-	CONTEXT_MENU_IDS,
 	MESSAGE_TYPES,
 	POSTHOG_EVENT_KEY,
 } from "../utils/constants"
@@ -22,23 +21,55 @@ import type {
 	MemoryPayload,
 } from "../utils/types"
 
+const PLATFORM_LABELS: Record<string, string> = {
+	chatgpt: "ChatGPT",
+	claude: "Claude",
+	gemini: "Gemini",
+	t3: "T3 Chat",
+	twitter: "X / Twitter",
+}
+
+function normalizePlatform(value?: string): string | undefined {
+	if (!value) return undefined
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "")
+}
+
+function inferPlatformFromActionSource(
+	actionSource: string,
+): string | undefined {
+	const source = actionSource.toLowerCase()
+	if (source.includes("chatgpt")) return "chatgpt"
+	if (source.includes("claude")) return "claude"
+	if (source.includes("gemini")) return "gemini"
+	if (source.includes("t3")) return "t3"
+	if (source.includes("twitter") || source.includes("x_")) return "twitter"
+	return undefined
+}
+
+function inferPlatformFromUrl(url?: string): string | undefined {
+	if (!url) return undefined
+	try {
+		const hostname = new URL(url).hostname
+		if (hostname === "chatgpt.com" || hostname === "chat.openai.com") {
+			return "chatgpt"
+		}
+		if (hostname === "claude.ai") return "claude"
+		if (hostname === "gemini.google.com") return "gemini"
+		if (hostname === "t3.chat") return "t3"
+		if (hostname === "x.com" || hostname === "twitter.com") return "twitter"
+	} catch {
+		return undefined
+	}
+}
+
 export default defineBackground(() => {
 	let twitterImporter: TwitterImporter | null = null
 
 	browser.runtime.onInstalled.addListener(async (details) => {
-		browser.contextMenus.create({
-			id: CONTEXT_MENU_IDS.SAVE_TO_SUPERMEMORY,
-			title: "sync to supermemory",
-			contexts: ["selection", "page", "link"],
-		})
-
-		browser.contextMenus.create({
-			id: CONTEXT_MENU_IDS.SEARCH_SUPERMEMORY,
-			title: "search supermemory",
-			contexts: ["selection"],
-		})
-
-		if (details.reason === "install") {
+		if (details.reason === "install" || details.reason === "update") {
 			await trackEvent("extension_installed", {
 				reason: details.reason,
 				version: browser.runtime.getManifest().version,
@@ -58,38 +89,6 @@ export default defineBackground(() => {
 		{ urls: ["*://x.com/*", "*://twitter.com/*"] },
 		["requestHeaders", "extraHeaders"],
 	)
-
-	// Handle context menu clicks.
-	browser.contextMenus.onClicked.addListener(async (info, tab) => {
-		if (info.menuItemId === CONTEXT_MENU_IDS.SAVE_TO_SUPERMEMORY) {
-			if (tab?.id) {
-				try {
-					await browser.tabs.sendMessage(tab.id, {
-						action: MESSAGE_TYPES.SAVE_MEMORY,
-						actionSource: "context_menu",
-					})
-				} catch (error) {
-					console.error("Failed to send message to content script:", error)
-				}
-			}
-		}
-
-		if (info.menuItemId === CONTEXT_MENU_IDS.SEARCH_SUPERMEMORY) {
-			if (tab?.id && info.selectionText) {
-				try {
-					await browser.tabs.sendMessage(tab.id, {
-						action: MESSAGE_TYPES.OPEN_SEARCH_PANEL,
-						data: info.selectionText,
-					})
-				} catch (error) {
-					console.error(
-						"Failed to send search message to content script:",
-						error,
-					)
-				}
-			}
-		}
-	})
 
 	// Send message to current active tab.
 	const sendMessageToCurrentTab = async (message: string) => {
@@ -152,9 +151,31 @@ export default defineBackground(() => {
 				content = data?.url || ""
 			}
 
+			const platform =
+				normalizePlatform(data.sourcePlatform) ||
+				inferPlatformFromUrl(data.url) ||
+				inferPlatformFromActionSource(actionSource)
+			const platformLabel = platform
+				? data.sourcePlatformLabel || PLATFORM_LABELS[platform] || platform
+				: undefined
+
 			const metadata: MemoryPayload["metadata"] = {
 				sm_source: "consumer",
+				sm_origin: "browser_extension",
+				sm_origin_action: actionSource,
 				website_url: data.url,
+			}
+
+			if (platform) {
+				metadata.sm_origin_platform = platform
+			}
+
+			if (platformLabel) {
+				metadata.sm_origin_platform_label = platformLabel
+			}
+
+			if (data.sourceSurface) {
+				metadata.sm_origin_surface = data.sourceSurface
 			}
 
 			if (data.ogImage) {
@@ -193,7 +214,17 @@ export default defineBackground(() => {
 		eventSource: string,
 	): Promise<{ success: boolean; data?: unknown; error?: string }> => {
 		try {
-			const responseData = await searchMemories(data)
+			let containerTag: string = CONTAINER_TAGS.DEFAULT_PROJECT
+			try {
+				const defaultProject = await getDefaultProject()
+				if (defaultProject?.containerTag) {
+					containerTag = defaultProject.containerTag
+				}
+			} catch (error) {
+				console.warn("Failed to get default project, using fallback:", error)
+			}
+
+			const responseData = await searchMemories(data, containerTag)
 			const response = responseData as {
 				results?: Array<{ memory?: string }>
 			}
@@ -201,7 +232,6 @@ export default defineBackground(() => {
 			response.results?.forEach((result, index) => {
 				memories.push(`${index + 1}. ${result.memory} \n`)
 			})
-			console.log("Memories:", memories)
 			await trackEvent(eventSource)
 			return { success: true, data: memories }
 		} catch (error) {
@@ -281,12 +311,12 @@ export default defineBackground(() => {
 							platform: string
 							source: string
 						}
-						console.log("=== PROMPT CAPTURED ===")
-						console.log(messageData)
-						console.log("========================")
 
 						const memoryData: MemoryData = {
 							content: messageData.prompt,
+							url: messageData.source,
+							sourcePlatform: messageData.platform,
+							sourceSurface: "prompt_capture",
 						}
 
 						const result = await saveMemoryToSupermemory(
@@ -313,31 +343,6 @@ export default defineBackground(() => {
 						sendResponse({
 							success: false,
 							error: error instanceof Error ? error.message : "Unknown error",
-						})
-					}
-				})()
-				return true
-			}
-
-			if (message.action === MESSAGE_TYPES.SEARCH_SELECTION) {
-				;(async () => {
-					try {
-						const query = message.data as string
-						const responseData = await searchMemories(query)
-						await trackEvent(POSTHOG_EVENT_KEY.SELECTION_SEARCH_TRIGGERED, {
-							query_length: query.length,
-						})
-						sendResponse({ success: true, data: responseData })
-					} catch (error) {
-						const errorMessage =
-							error instanceof Error ? error.message : "Unknown error"
-						const isAuthError =
-							errorMessage.includes("Authentication") ||
-							errorMessage.includes("token")
-						sendResponse({
-							success: false,
-							error: errorMessage,
-							isAuthError,
 						})
 					}
 				})()

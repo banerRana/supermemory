@@ -1,5 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import type { useCustomer } from "autumn-js/react"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { z } from "zod"
 import type { DocumentsWithMemoriesResponseSchema } from "../validation/api"
@@ -8,105 +7,92 @@ import { $fetch } from "./api"
 type DocumentsResponse = z.infer<typeof DocumentsWithMemoriesResponseSchema>
 type DocumentWithMemories = DocumentsResponse["documents"][0]
 
-export const fetchSubscriptionStatus = (
-	autumn: ReturnType<typeof useCustomer>,
-	isEnabled: boolean,
-) =>
-	useQuery({
-		queryFn: async () => {
-			const allPlans = ["consumer_pro"]
-			const statusMap: Record<
-				string,
-				{ allowed: boolean; status: string | null }
-			> = {}
+export const PLAN_TIERS = [
+	"api_pro",
+	"api_max",
+	"api_scale",
+	"api_enterprise",
+] as const
+export type PlanTier = (typeof PLAN_TIERS)[number]
 
-			await Promise.all(
-				allPlans.map(async (plan) => {
-					try {
-						const res = autumn.check({
-							productId: plan,
-						})
-						const allowed = res.data?.allowed ?? false
+export type SubscriptionStatusMap = Record<
+	string,
+	{ allowed: boolean; status: string | null }
+>
 
-						const product = autumn.customer?.products?.find(
-							(p) => p.id === plan,
-						)
-						const productStatus = product?.status ?? null
+const DEFAULT_SUBSCRIPTION_STATUS: SubscriptionStatusMap = {
+	api_pro: { allowed: false, status: null },
+	api_max: { allowed: false, status: null },
+	api_scale: { allowed: false, status: null },
+	api_enterprise: { allowed: false, status: null },
+}
 
-						statusMap[plan] = {
-							allowed,
-							status: productStatus,
-						}
-					} catch (error) {
-						console.error(`Error checking status for ${plan}:`, error)
-						statusMap[plan] = { allowed: false, status: null }
-					}
-				}),
-			)
+function isLiveSubscriptionStatus(status: string | null | undefined): boolean {
+	return status === "active" || status === "trialing"
+}
 
-			return statusMap
-		},
-		queryKey: ["subscription-status"],
-		refetchInterval: 5000, // Refetch every 5 seconds
-		staleTime: 4000, // Consider data stale after 4 seconds
-		enabled: isEnabled,
+export function isAllowedFrom(
+	status: SubscriptionStatusMap,
+	minimumTier: PlanTier,
+): boolean {
+	const minIndex = PLAN_TIERS.indexOf(minimumTier)
+	return PLAN_TIERS.slice(minIndex).some((tier) => {
+		const s = status[tier]
+		return isLiveSubscriptionStatus(s?.status)
 	})
+}
 
-// Feature checks
-export const fetchMemoriesFeature = (
-	autumn: ReturnType<typeof useCustomer>,
-	isEnabled: boolean,
-) =>
-	useQuery({
-		queryFn: async () => {
-			const res = autumn.check({ featureId: "memories" })
-			return res.data
-		},
-		queryKey: ["autumn-feature", "memories"],
-		staleTime: 30 * 1000, // 30 seconds
-		gcTime: 5 * 60 * 1000, // 5 minutes
-		enabled: isEnabled,
-	})
+export function getSubscriptionStatus(
+	subscriptions: Array<{ planId: string; status: string }> | undefined,
+): SubscriptionStatusMap {
+	const statusMap: SubscriptionStatusMap = { ...DEFAULT_SUBSCRIPTION_STATUS }
+	if (!subscriptions) return statusMap
 
-export const fetchConnectionsFeature = (
-	autumn: ReturnType<typeof useCustomer>,
-	isEnabled: boolean,
-) =>
-	useQuery({
-		queryFn: async () => {
-			const res = autumn.check({ featureId: "connections" })
-			return res.data
-		},
-		queryKey: ["autumn-feature", "connections"],
-		staleTime: 30 * 1000, // 30 seconds
-		gcTime: 5 * 60 * 1000, // 5 minutes
-		enabled: isEnabled,
-	})
+	const subMap = new Map(subscriptions.map((s) => [s.planId, s]))
 
-// Product checks
-export const fetchConsumerProProduct = (
-	autumn: ReturnType<typeof useCustomer>,
-) =>
-	useQuery({
-		queryFn: async () => {
-			const res = autumn.check({ productId: "consumer_pro" })
-			return res.data
-		},
-		queryKey: ["autumn-product", "consumer_pro"],
-		staleTime: 30 * 1000, // 30 seconds
-		gcTime: 5 * 60 * 1000, // 5 minutes
-	})
+	for (const tier of PLAN_TIERS) {
+		const sub = subMap.get(tier)
+		statusMap[tier] = {
+			allowed: isLiveSubscriptionStatus(sub?.status),
+			status: sub?.status ?? null,
+		}
+	}
+	return statusMap
+}
 
-export const fetchProProduct = (autumn: ReturnType<typeof useCustomer>) =>
-	useQuery({
-		queryFn: async () => {
-			const res = autumn.check({ productId: "pro" })
-			return res.data
-		},
-		queryKey: ["autumn-product", "pro"],
-		staleTime: 30 * 1000, // 30 seconds
-		gcTime: 5 * 60 * 1000, // 5 minutes
-	})
+export function hasActivePlan(
+	subscriptions: Array<{ planId: string; status: string }> | undefined,
+	minimumTier: PlanTier,
+): boolean {
+	return isAllowedFrom(getSubscriptionStatus(subscriptions), minimumTier)
+}
+
+export type CanceledSubscription = { planId: string; endsAt: number | null }
+
+// A subscription scheduled to cancel at period end: still active, but canceledAt is set.
+export function getCanceledSubscription(
+	subscriptions:
+		| Array<{
+				planId: string
+				status?: string
+				canceledAt?: number | null
+				currentPeriodEnd?: number | null
+				expiresAt?: number | null
+		  }>
+		| undefined,
+): CanceledSubscription | null {
+	const sub = subscriptions?.find(
+		(s) =>
+			s.status === "active" &&
+			s.canceledAt != null &&
+			(PLAN_TIERS as readonly string[]).includes(s.planId),
+	)
+	if (!sub) return null
+	return {
+		planId: sub.planId,
+		endsAt: sub.currentPeriodEnd ?? sub.expiresAt ?? null,
+	}
+}
 
 export const useDeleteDocument = (selectedProject: string) => {
 	const queryClient = useQueryClient()
@@ -134,18 +120,41 @@ export const useDeleteDocument = (selectedProject: string) => {
 				["documents-with-memories", selectedProject],
 				(old: unknown) => {
 					if (!old || typeof old !== "object") return old
-					const typedOld = old as {
-						pages?: Array<{ documents?: DocumentWithMemories[] }>
+
+					// Handle Infinite Query structure (TanStack Query v5 uses 'pages')
+					if (
+						"pages" in old &&
+						Array.isArray((old as Record<string, unknown>).pages)
+					) {
+						const typedOld = old as {
+							pages: Array<{ documents?: DocumentWithMemories[] }>
+						}
+						return {
+							...typedOld,
+							pages: typedOld.pages.map((page) => ({
+								...page,
+								documents: page.documents?.filter(
+									(doc: DocumentWithMemories) => doc.id !== documentId,
+								),
+							})),
+						}
 					}
-					return {
-						...typedOld,
-						pages: typedOld.pages?.map((page) => ({
-							...page,
-							documents: page.documents?.filter(
+
+					// Handle Standard Query structure
+					if (
+						"documents" in old &&
+						Array.isArray((old as Record<string, unknown>).documents)
+					) {
+						const typedOld = old as { documents: DocumentWithMemories[] }
+						return {
+							...typedOld,
+							documents: typedOld.documents.filter(
 								(doc: DocumentWithMemories) => doc.id !== documentId,
 							),
-						})),
+						}
 					}
+
+					return old
 				},
 			)
 

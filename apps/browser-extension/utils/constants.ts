@@ -10,20 +10,41 @@ export const API_ENDPOINTS = {
 		: "http://localhost:3000",
 } as const
 
+export function getSupermemoryLoginUrl(): string {
+	const baseUrl = API_ENDPOINTS.SUPERMEMORY_WEB
+	const loginUrl = new URL("/login", baseUrl)
+	const redirectUrl = new URL("/", baseUrl)
+
+	redirectUrl.searchParams.set("extension-auth-success", "true")
+	loginUrl.searchParams.set("redirect", redirectUrl.toString())
+
+	return loginUrl.toString()
+}
+
 /**
  * DOM Element IDs
  */
 export const ELEMENT_IDS = {
 	TWITTER_IMPORT_BUTTON: "sm-twitter-import-button",
+	TWITTER_ONBOARDING_TOAST: "sm-twitter-onboarding-toast",
+	TWITTER_IMPORT_PROGRESS_TOAST: "sm-twitter-import-progress-toast",
 	SUPERMEMORY_TOAST: "sm-toast",
 	SUPERMEMORY_SAVE_BUTTON: "sm-save-button",
 	SAVE_TWEET_ELEMENT: "sm-save-tweet-element",
 	CHATGPT_INPUT_BAR_ELEMENT: "sm-chatgpt-input-bar-element",
 	CLAUDE_INPUT_BAR_ELEMENT: "sm-claude-input-bar-element",
+	GEMINI_INPUT_BAR_ELEMENT: "sm-gemini-input-bar-element",
 	T3_INPUT_BAR_ELEMENT: "sm-t3-input-bar-element",
 	PROJECT_SELECTION_MODAL: "sm-project-selection-modal",
-	SELECTION_SEARCH_FAB: "sm-selection-search-fab",
-	SELECTION_SEARCH_PANEL: "sm-selection-search-panel",
+} as const
+
+/**
+ * Storage Keys for local
+ */
+export const STORAGE_KEYS = {
+	TWITTER_BOOKMARKS_ONBOARDING_SEEN: "sm_twitter_bookmarks_onboarding_seen",
+	TWITTER_BOOKMARKS_IMPORT_INTENT_UNTIL:
+		"sm_twitter_bookmarks_import_intent_until",
 } as const
 
 /**
@@ -32,14 +53,14 @@ export const ELEMENT_IDS = {
 export const UI_CONFIG = {
 	BUTTON_SHOW_DELAY: 2000, // milliseconds
 	TOAST_DURATION: 3000, // milliseconds
+	ONBOARDING_TOAST_DURATION: 6000, // milliseconds (6 seconds for progress bar)
+	IMPORT_INTENT_TTL: 2 * 60 * 1000, // 2 minutes TTL for import intent
 	RATE_LIMIT_BASE_WAIT: 60000, // 1 minute
 	PAGINATION_DELAY: 1000, // 1 second between requests
 	AUTO_SEARCH_DEBOUNCE_DELAY: 1500, // milliseconds to wait after user stops typing
 	OBSERVER_THROTTLE_DELAY: 300, // milliseconds between observer callback executions
 	ROUTE_CHECK_INTERVAL: 2000, // milliseconds between route change checks
 	API_REQUEST_TIMEOUT: 10000, // milliseconds for API request timeout
-	SELECTION_MIN_LENGTH: 3, // minimum characters to show FAB
-	SELECTION_MAX_LENGTH: 500, // maximum characters to show FAB
 } as const
 
 /**
@@ -49,6 +70,8 @@ export const DOMAINS = {
 	TWITTER: ["x.com", "twitter.com"],
 	CHATGPT: ["chatgpt.com", "chat.openai.com"],
 	CLAUDE: ["claude.ai"],
+	GROK: ["grok.com", "x.ai"],
+	GEMINI: ["gemini.google.com"],
 	T3: ["t3.chat"],
 	SUPERMEMORY: ["localhost", "supermemory.ai", "app.supermemory.ai"],
 } as const
@@ -73,13 +96,7 @@ export const MESSAGE_TYPES = {
 	GET_RELATED_MEMORIES: "sm-get-related-memories",
 	CAPTURE_PROMPT: "sm-capture-prompt",
 	FETCH_PROJECTS: "sm-fetch-projects",
-	SEARCH_SELECTION: "sm-search-selection",
-	OPEN_SEARCH_PANEL: "sm-open-search-panel",
-} as const
-
-export const CONTEXT_MENU_IDS = {
-	SAVE_TO_SUPERMEMORY: "sm-save-to-supermemory",
-	SEARCH_SUPERMEMORY: "sm-search-supermemory",
+	TWITTER_IMPORT_OPEN_MODAL: "sm-twitter-import-open-modal",
 } as const
 
 export const POSTHOG_EVENT_KEY = {
@@ -91,8 +108,8 @@ export const POSTHOG_EVENT_KEY = {
 	T3_CHAT_MEMORIES_AUTO_SEARCHED: "t3_chat_memories_auto_searched",
 	CLAUDE_CHAT_MEMORIES_SEARCHED: "claude_chat_memories_searched",
 	CLAUDE_CHAT_MEMORIES_AUTO_SEARCHED: "claude_chat_memories_auto_searched",
+	GEMINI_CHAT_MEMORIES_SEARCHED: "gemini_chat_memories_searched",
+	GEMINI_CHAT_MEMORIES_AUTO_SEARCHED: "gemini_chat_memories_auto_searched",
 	CHATGPT_CHAT_MEMORIES_SEARCHED: "chatgpt_chat_memories_searched",
 	CHATGPT_CHAT_MEMORIES_AUTO_SEARCHED: "chatgpt_chat_memories_auto_searched",
-	SELECTION_SEARCH_TRIGGERED: "selection_search_triggered",
-	SELECTION_SEARCH_COPIED: "selection_search_copied",
 } as const

@@ -36,7 +36,7 @@ const strokeVariants: Variants = {
 export function SuperLoader({
 	size = 42,
 	colorClassName = "text-sky-400",
-	label = "Loading...",
+	label = "Loading…",
 	className = "",
 }: NovaPathLoaderProps) {
 	const prefersReducedMotion = useReducedMotion()
@@ -44,20 +44,19 @@ export function SuperLoader({
 	const animateVariant = prefersReducedMotion ? "static" : "visible"
 
 	return (
-		<div
-			role="status"
+		<output
 			aria-label={label}
-			className={`inline-flex flex-col items-center gap-2 ${className}`}
-			style={{ width: size + 10 }}
+			className={`inline-flex flex-row items-center gap-2 ${className}`}
+			style={{ minWidth: size + 10 }}
 		>
 			<motion.svg
 				xmlns="http://www.w3.org/2000/svg"
 				viewBox="0 0 21 21"
-				width={size}
-				height={size}
+				width={size * 0.5}
+				height={size * 0.5}
 				className={`shrink-0 ${colorClassName}`}
 			>
-				<title>Loading...</title>
+				<title>Loading…</title>
 				{/* Right path */}
 				<motion.path
 					d={PATH_RIGHT}
@@ -88,11 +87,11 @@ export function SuperLoader({
 			</motion.svg>
 
 			<span
-				className="text-xs font-medium text-slate-500"
+				className="whitespace-nowrap text-xs font-medium text-slate-500"
 				style={{ fontSize: size * 0.25 }}
 			>
 				{label}
 			</span>
-		</div>
+		</output>
 	)
 }

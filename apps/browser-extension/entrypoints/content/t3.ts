@@ -10,11 +10,30 @@ import {
 	autoCapturePromptsEnabled,
 } from "../../utils/storage"
 import { createT3InputBarElement, DOMUtils } from "../../utils/ui-components"
+import {
+	buildSupermemoryText,
+	parseMemoriesFromDataset,
+	renumberIncludedMemories,
+	serializeMemoriesForDataset,
+} from "./memory-suggestion"
 
 let t3DebounceTimeout: NodeJS.Timeout | null = null
 let t3RouteObserver: MutationObserver | null = null
 let t3UrlCheckInterval: NodeJS.Timeout | null = null
 let t3ObserverThrottle: NodeJS.Timeout | null = null
+let t3IncludedPopup: {
+	el: HTMLElement
+	onClick: (event: MouseEvent) => void
+	timer: ReturnType<typeof setTimeout>
+} | null = null
+
+function disposeT3IncludedPopup() {
+	if (!t3IncludedPopup) return
+	document.removeEventListener("click", t3IncludedPopup.onClick)
+	clearTimeout(t3IncludedPopup.timer)
+	t3IncludedPopup.el.remove()
+	t3IncludedPopup = null
+}
 
 export function initializeT3() {
 	if (!DOMUtils.isOnDomain(DOMAINS.T3)) {
@@ -26,7 +45,6 @@ export function initializeT3() {
 	}
 
 	setTimeout(() => {
-		console.log("Adding supermemory icon to T3 input")
 		addSupermemoryIconToT3Input()
 		setupT3AutoFetch()
 	}, 2000)
@@ -54,8 +72,8 @@ function setupT3RouteChangeDetection() {
 
 	const checkForRouteChange = () => {
 		if (window.location.href !== currentUrl) {
+			disposeT3IncludedPopup()
 			currentUrl = window.location.href
-			console.log("T3 route changed, re-adding supermemory icon")
 			setTimeout(() => {
 				addSupermemoryIconToT3Input()
 				setupT3AutoFetch()
@@ -183,10 +201,7 @@ async function getRelatedMemoriesForT3(actionSource: string) {
 			}
 		}
 
-		console.log("T3 query extracted:", userQuery)
-
 		if (!userQuery.trim()) {
-			console.log("No query text found for T3")
 			return
 		}
 
@@ -217,8 +232,6 @@ async function getRelatedMemoriesForT3(actionSource: string) {
 			timeoutPromise,
 		])
 
-		console.log("T3 memories response:", response)
-
 		if (response?.success && response?.data) {
 			let textareaElement = null
 			const supermemoryContainer = document.querySelector(
@@ -238,15 +251,13 @@ async function getRelatedMemoriesForT3(actionSource: string) {
 			}
 
 			if (textareaElement) {
-				if (textareaElement.tagName === "TEXTAREA") {
-					;(textareaElement as HTMLTextAreaElement).dataset.supermemories =
-						`<br>Supermemories of user (only for the reference): ${response.data}</br>`
-				} else {
-					;(textareaElement as HTMLElement).dataset.supermemories =
-						`<br>Supermemories of user (only for the reference): ${response.data}</br>`
-				}
+				textareaElement.dataset.supermemories = buildSupermemoryText(
+					response.data,
+				)
 
-				iconElement.dataset.memoriesData = response.data
+				iconElement.dataset.memoriesData = serializeMemoriesForDataset(
+					response.data,
+				)
 
 				updateT3IconFeedback("Included Memories", iconElement)
 			} else {
@@ -280,6 +291,8 @@ function updateT3IconFeedback(
 	if (!iconElement.dataset.originalHtml) {
 		iconElement.dataset.originalHtml = iconElement.innerHTML
 	}
+
+	disposeT3IncludedPopup()
 
 	const feedbackDiv = document.createElement("div")
 	feedbackDiv.style.cssText = `
@@ -342,13 +355,9 @@ function updateT3IconFeedback(
 			overflow-y: auto;
 		`
 
-		const memoriesText = iconElement.dataset.memoriesData || ""
-		console.log("Memories text:", memoriesText)
-		const individualMemories = memoriesText
-			.split(/[,\n]/)
-			.map((memory) => memory.trim())
-			.filter((memory) => memory.length > 0 && memory !== ",")
-		console.log("Individual memories:", individualMemories)
+		const individualMemories = parseMemoriesFromDataset(
+			iconElement.dataset.memoriesData,
+		)
 
 		individualMemories.forEach((memory, index) => {
 			const memoryItem = document.createElement("div")
@@ -420,66 +429,65 @@ function updateT3IconFeedback(
 			popup.style.display = "block"
 		})
 
-		document.addEventListener("click", (e) => {
+		const onClick = (e: MouseEvent) => {
 			if (!popup.contains(e.target as Node)) {
 				popup.style.display = "none"
 			}
-		})
+		}
+		document.addEventListener("click", onClick)
+		t3IncludedPopup = {
+			el: popup,
+			onClick,
+			timer: setTimeout(disposeT3IncludedPopup, 300000),
+		}
 
 		content.querySelectorAll("button[data-memory-index]").forEach((button) => {
 			const htmlButton = button as HTMLButtonElement
 			htmlButton.addEventListener("click", () => {
 				const index = Number.parseInt(htmlButton.dataset.memoryIndex || "0", 10)
-				const memoryItem = htmlButton.parentElement
+				htmlButton.parentElement?.remove()
 
-				if (memoryItem) {
-					content.removeChild(memoryItem)
-				}
-
-				const currentMemories = (iconElement.dataset.memoriesData || "")
-					.split(/[,\n]/)
-					.map((memory) => memory.trim())
-					.filter((memory) => memory.length > 0 && memory !== ",")
-				currentMemories.splice(index, 1)
-
-				const updatedMemories = currentMemories.join(" ,")
-
-				iconElement.dataset.memoriesData = updatedMemories
+				const remainingMemories = parseMemoriesFromDataset(
+					iconElement.dataset.memoriesData,
+				)
+				remainingMemories.splice(index, 1)
+				const remaining = renumberIncludedMemories(remainingMemories)
 
 				const textareaElement =
 					(document.querySelector("textarea") as HTMLTextAreaElement) ||
 					(document.querySelector('div[contenteditable="true"]') as HTMLElement)
+
+				// Only wipe when nothing remains — `<= 1` used to discard the last kept memory.
+				if (remaining.length === 0) {
+					if (textareaElement?.dataset.supermemories) {
+						delete textareaElement.dataset.supermemories
+					}
+					delete iconElement.dataset.memoriesData
+					iconElement.innerHTML = iconElement.dataset.originalHtml || ""
+					delete iconElement.dataset.originalHtml
+					disposeT3IncludedPopup()
+					return
+				}
+
+				iconElement.dataset.memoriesData =
+					serializeMemoriesForDataset(remaining)
 				if (textareaElement) {
-					textareaElement.dataset.supermemories = `<div>Supermemories of user (only for the reference): ${updatedMemories}</div>`
+					textareaElement.dataset.supermemories =
+						buildSupermemoryText(remaining)
 				}
 
 				content
 					.querySelectorAll("button[data-memory-index]")
 					.forEach((btn, newIndex) => {
 						const htmlBtn = btn as HTMLButtonElement
-						htmlBtn.dataset.memoryIndex = newIndex.toString()
+						htmlBtn.dataset.memoryIndex = String(newIndex)
+						const label = htmlBtn.previousElementSibling
+						if (label) {
+							label.textContent = remaining[newIndex].trim()
+						}
 					})
-
-				if (currentMemories.length <= 1) {
-					if (textareaElement?.dataset.supermemories) {
-						delete textareaElement.dataset.supermemories
-						delete iconElement.dataset.memoriesData
-						iconElement.innerHTML = iconElement.dataset.originalHtml || ""
-						delete iconElement.dataset.originalHtml
-					}
-					popup.style.display = "none"
-					if (document.body.contains(popup)) {
-						document.body.removeChild(popup)
-					}
-				}
 			})
 		})
-
-		setTimeout(() => {
-			if (document.body.contains(popup)) {
-				document.body.removeChild(popup)
-			}
-		}, 300000)
 	}
 
 	iconElement.innerHTML = ""
@@ -499,11 +507,10 @@ function setupT3PromptCapture() {
 	}
 	document.body.setAttribute("data-t3-prompt-capture-setup", "true")
 
-	const captureT3PromptContent = async (source: string) => {
+	const captureT3PromptContent = async (_source: string) => {
 		const autoCapture = (await autoCapturePromptsEnabled.getValue()) ?? false
 
 		if (!autoCapture) {
-			console.log("Auto capture prompts is disabled, skipping prompt capture")
 			return
 		}
 		let promptContent = ""
@@ -537,22 +544,20 @@ function setupT3PromptCapture() {
 					`${promptContent} ${storedMemories}`
 				promptContent = (textareaElement as HTMLTextAreaElement).value
 			} else {
-				textareaElement.innerHTML = `${textareaElement.innerHTML} ${storedMemories}`
+				textareaElement.appendChild(document.createTextNode(storedMemories))
 				promptContent =
 					textareaElement.textContent || textareaElement.innerText || ""
 			}
 		}
 
 		if (promptContent.trim()) {
-			console.log(`T3 prompt submitted via ${source}:`, promptContent)
-
 			try {
 				await browser.runtime.sendMessage({
 					action: MESSAGE_TYPES.CAPTURE_PROMPT,
 					data: {
 						prompt: promptContent,
 						platform: "t3",
-						source: source,
+						source: window.location.href,
 					},
 				})
 			} catch (error) {
@@ -574,6 +579,7 @@ function setupT3PromptCapture() {
 		if (textareaElement?.dataset.supermemories) {
 			delete textareaElement.dataset.supermemories
 		}
+		disposeT3IncludedPopup()
 	}
 
 	const handleT3SendButtonClick = async (event: Event) => {
@@ -729,6 +735,7 @@ async function setupT3AutoFetch() {
 				if (textareaElement.dataset.supermemories) {
 					delete textareaElement.dataset.supermemories
 				}
+				disposeT3IncludedPopup()
 			}
 		}, UI_CONFIG.AUTO_SEARCH_DEBOUNCE_DELAY)
 	}

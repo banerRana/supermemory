@@ -3,6 +3,7 @@ import {
 	anonymousClient,
 	apiKeyClient,
 	emailOTPClient,
+	genericOAuthClient,
 	magicLinkClient,
 	organizationClient,
 	usernameClient,
@@ -13,12 +14,13 @@ export const authClient = createAuthClient({
 	baseURL: process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://api.supermemory.ai",
 	fetchOptions: {
 		credentials: "include",
-		throw: true,
+		headers: { "X-App-Source": "nova" },
 	},
 	plugins: [
 		usernameClient(),
 		magicLinkClient(),
 		emailOTPClient(),
+		genericOAuthClient(),
 		apiKeyClient(),
 		adminClient(),
 		organizationClient(),

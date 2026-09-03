@@ -1,20 +1,79 @@
 import { getSessionCookie } from "better-auth/cookies"
 import { NextResponse } from "next/server"
+import { getPublicRequestUrl } from "@/lib/url-helpers"
+
+const LOCAL_DEV_HOSTS = new Set(["localhost", "127.0.0.1", "::1"])
+
+function getAuthSessionCookie(request: Request): string | null {
+	return (
+		getSessionCookie(request) ??
+		getSessionCookie(request, { cookiePrefix: "better-auth-dev-localhost" }) ??
+		getSessionCookie(request, { cookiePrefix: "better-auth-dev" })
+	)
+}
 
 export default async function proxy(request: Request) {
 	console.debug("[PROXY] === PROXY START ===")
-	const url = new URL(request.url)
-  
+	const url = getPublicRequestUrl(request)
+
 	console.debug("[PROXY] Path:", url.pathname)
 	console.debug("[PROXY] Method:", request.method)
 
-	const sessionCookie = getSessionCookie(request)
+	// Development builds only: getPublicRequestUrl trusts x-forwarded-host, so
+	// a hostname check alone could be spoofed in production to skip the /api
+	// 401 gate below. NODE_ENV is inlined at build time, making this dead code
+	// in production bundles.
+	if (
+		process.env.NODE_ENV === "development" &&
+		LOCAL_DEV_HOSTS.has(url.hostname)
+	) {
+		console.debug("[PROXY] Local dev host, allowing access")
+		return NextResponse.next()
+	}
+
+	if (
+		url.pathname === "/auth/connect" ||
+		url.pathname === "/auth/agent-connect"
+	) {
+		const target = new URL(url.toString())
+		const labels = url.hostname.split(".")
+		const appLabel = labels.indexOf("app")
+		if (appLabel !== -1) {
+			labels[appLabel] = "console"
+			target.hostname = labels.join(".")
+		} else {
+			target.hostname = "console.supermemory.ai"
+		}
+		target.pathname = "/auth/connect"
+		return NextResponse.redirect(target, 308)
+	}
+
+	const sessionCookie = getAuthSessionCookie(request)
 	console.debug("[PROXY] Session cookie exists:", !!sessionCookie)
 
 	// Always allow access to login and waitlist pages
 	const publicPaths = ["/login", "/login/new"]
 	if (publicPaths.includes(url.pathname)) {
 		console.debug("[PROXY] Public path, allowing access")
+		return NextResponse.next()
+	}
+
+	// Integrations index and MCP setup are public in guest mode; actions still
+	// require login. The ?view param is only meaningful at "/" (see
+	// lib/view-mode-context, which ignores it elsewhere), so scope it there —
+	// unscoped, ?view=mcp would let any path skip the /api/ gate below.
+	if (
+		url.pathname === "/" &&
+		["integrations", "mcp"].includes(url.searchParams.get("view") ?? "")
+	) {
+		return NextResponse.next()
+	}
+
+	// Real integrations routes, public in guest mode (mirrors view=integrations / view=mcp).
+	if (
+		url.pathname === "/integrations" ||
+		url.pathname === "/integrations/mcp"
+	) {
 		return NextResponse.next()
 	}
 
@@ -35,9 +94,9 @@ export default async function proxy(request: Request) {
 		console.debug(
 			"[PROXY] No session cookie and not on public path, redirecting to /login",
 		)
-		const url = new URL("/login", request.url)
-		url.searchParams.set("redirect", request.url)
-		return NextResponse.redirect(url)
+		const loginUrl = new URL("/login", url.origin)
+		loginUrl.searchParams.set("redirect", url.toString())
+		return NextResponse.redirect(loginUrl)
 	}
 
 	// TEMPORARILY DISABLED: Waitlist check
@@ -66,6 +125,6 @@ export default async function proxy(request: Request) {
 
 export const config = {
 	matcher: [
-		"/((?!_next/static|_next/image|images|icon.png|monitoring|opengraph-image.png|bg-rectangle.png|onboarding|ingest|login|api/emails).*)",
+		"/((?!_next/static|_next/image|images|icon.png|favicon.ico|favicon-16x16.png|favicon-32x32.png|apple-touch-icon.png|android-chrome-192x192.png|android-chrome-512x512.png|manifest.webmanifest|site.webmanifest|monitoring|opengraph-image.png|bg-rectangle.png|onboarding|ingest|login|api/emails|mcp-supported-tools|mcp-icon.svg).*)",
 	],
 }

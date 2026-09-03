@@ -4,34 +4,35 @@ import {
 	AnalyticsChatResponseSchema,
 	AnalyticsMemoryResponseSchema,
 	AnalyticsUsageResponseSchema,
+	BulkDeleteMemoriesResponseSchema,
+	BulkDeleteMemoriesSchema,
 	ConnectionResponseSchema,
+	ContainerTagSettingsUpdateSchema,
 	CreateProjectSchema,
 	DeleteProjectResponseSchema,
 	DeleteProjectSchema,
 	DocumentsWithMemoriesQuerySchema,
 	DocumentsWithMemoriesResponseSchema,
+	ListContainerTagsResponseSchema,
 	ListMemoriesResponseSchema,
 	ListProjectsResponseSchema,
 	MemoryAddSchema,
 	MemoryResponseSchema,
 	MigrateMCPRequestSchema,
 	MigrateMCPResponseSchema,
+	ProcessingDocumentsResponseSchema,
 	ProjectSchema,
 	SearchRequestSchema,
 	SearchResponseSchema,
 	type SearchResult,
 	SettingsRequestSchema,
+	UpdateContainerTagSettingsRequestSchema,
 } from "../validation/api"
 
-// Settings response schema - this is custom to console (not in shared validation)
-const SettingsResponseSchema = z.object({
-	message: z.string(),
-	settings: z.object({
-		excludeItems: z.array(z.string().min(1).max(20)).optional(),
-		filterPrompt: z.string().min(1).max(750).optional(),
-		includeItems: z.array(z.string().min(1).max(20)).optional(),
-		shouldLLMFilter: z.boolean().optional(),
-	}),
+const UpdateSettingsResponseSchema = z.object({
+	orgId: z.string(),
+	orgSlug: z.string(),
+	updated: SettingsRequestSchema,
 })
 
 // Analytics request schema - custom to console
@@ -51,6 +52,34 @@ const WaitlistStatusResponseSchema = z.object({
 })
 
 export const apiSchema = createSchema({
+	// Inferred-memory review queue (Nova "Suggested for you")
+	"@get/container-tags/:containerTag/inferred": {
+		output: z.object({
+			memories: z.array(
+				z.object({
+					id: z.string(),
+					memory: z.string(),
+					parentCount: z.number(),
+					createdAt: z.string(),
+					updatedAt: z.string(),
+					metadata: z.record(z.string(), z.unknown()).nullable(),
+				}),
+			),
+			total: z.number(),
+		}),
+		params: z.object({ containerTag: z.string() }),
+	},
+
+	"@post/container-tags/:containerTag/inferred/:memoryId/review": {
+		input: z.object({ action: z.enum(["approve", "decline", "undo"]) }),
+		output: z.object({
+			id: z.string(),
+			isInference: z.boolean(),
+			reviewStatus: z.enum(["approved", "declined"]).nullable(),
+		}),
+		params: z.object({ containerTag: z.string(), memoryId: z.string() }),
+	},
+
 	"@get/analytics/chat": {
 		output: AnalyticsChatResponseSchema,
 		query: AnalyticsRequestSchema,
@@ -78,13 +107,15 @@ export const apiSchema = createSchema({
 			redirectUrl: z.string().optional(),
 		}),
 		output: z.object({
-			authLink: z.string(),
-			expiresIn: z.string(),
+			// authLink/expiresIn are present for OAuth providers (Drive/Notion/OneDrive)
+			// but absent for credential-based ones like Granola where there's no redirect.
+			authLink: z.string().optional(),
+			expiresIn: z.string().optional(),
 			id: z.string(),
 			redirectsTo: z.string().optional(),
 		}),
 		params: z.object({
-			provider: z.enum(["google-drive", "notion", "onedrive"]),
+			provider: z.enum(["google-drive", "notion", "onedrive", "granola"]),
 		}),
 	},
 
@@ -116,20 +147,103 @@ export const apiSchema = createSchema({
 			provider: z.string(),
 		}),
 		params: z.object({ connectionId: z.string() }),
+		query: z.object({
+			deleteDocuments: z.boolean().optional(),
+		}),
+	},
+
+	"@get/connections/:connectionId/sync-runs": {
+		output: z.array(
+			z.object({
+				id: z.string(),
+				connectionId: z.string(),
+				status: z.enum(["running", "completed", "failed"]),
+				triggerType: z.enum(["event", "cron", "manual"]),
+				startedAt: z.string(),
+				completedAt: z.string().nullable(),
+				itemsProcessed: z.number(),
+				itemsFailed: z.number(),
+				error: z.string().nullable(),
+			}),
+		),
+		params: z.object({ connectionId: z.string() }),
+	},
+
+	"@post/connections/:provider/import": {
+		input: z.object({
+			containerTags: z.array(z.string()).optional(),
+		}),
+		output: z.unknown(),
+		params: z.object({
+			provider: z.enum([
+				"google-drive",
+				"notion",
+				"onedrive",
+				"gmail",
+				"github",
+				"web-crawler",
+				"s3",
+				"granola",
+			]),
+		}),
 	},
 
 	// Settings operations
 	"@get/settings": {
-		output: z.object({ settings: z.object({}).passthrough() }),
+		output: SettingsRequestSchema,
 	},
 	"@patch/settings": {
 		input: SettingsRequestSchema,
-		output: SettingsResponseSchema,
+		output: UpdateSettingsResponseSchema,
+	},
+	"@post/settings/reset": {
+		input: z.object({ confirmation: z.string() }),
+		output: z.object({
+			success: z.boolean(),
+			deletedConnections: z.number(),
+			deletedDocumentBatches: z.number(),
+			deletedDocumentsApprox: z.number(),
+			deletedMemoryRows: z.number(),
+			deletedExtraSpaces: z.number(),
+			clearedDefaultSpaceContext: z.boolean(),
+			settingsReset: z.boolean(),
+		}),
 	},
 	// Memory operations
 	"@post/documents": {
 		input: MemoryAddSchema,
 		output: MemoryResponseSchema,
+	},
+	"@post/documents/batch": {
+		input: z.object({
+			documents: z
+				.array(
+					z.object({
+						content: z.string(),
+						containerTags: z.array(z.string()).optional(),
+						containerTag: z.string().optional(),
+						entityContext: z.string().max(1500).optional(),
+						metadata: z.record(z.unknown()).optional(),
+					}),
+				)
+				.min(1)
+				.max(600),
+			containerTag: z.string().optional(),
+			entityContext: z.string().max(1500).optional(),
+			metadata: z.record(z.unknown()).optional(),
+		}),
+		output: z.object({
+			results: z.array(
+				z.object({
+					id: z.string(),
+					status: z.string(),
+					error: z.string().optional(),
+					details: z.string().optional(),
+				}),
+			),
+			success: z.number(),
+			failed: z.number(),
+		}),
 	},
 	"@post/documents/list": {
 		body: z
@@ -159,6 +273,15 @@ export const apiSchema = createSchema({
 		output: MigrateMCPResponseSchema,
 	},
 
+	"@get/documents/processing": {
+		output: ProcessingDocumentsResponseSchema,
+		query: z
+			.object({
+				containerTags: z.array(z.string()).optional(),
+			})
+			.optional(),
+	},
+
 	"@get/documents/:id": {
 		output: z.any(),
 	},
@@ -167,6 +290,12 @@ export const apiSchema = createSchema({
 	"@delete/documents/:id": {
 		output: z.any(), // 204 No-Content
 		params: z.object({ id: z.string() }),
+	},
+
+	// Bulk delete memories
+	"@delete/documents/bulk": {
+		body: BulkDeleteMemoriesSchema,
+		output: BulkDeleteMemoriesResponseSchema,
 	},
 
 	// Search operations
@@ -178,6 +307,38 @@ export const apiSchema = createSchema({
 	// Project operations
 	"@get/projects": {
 		output: ListProjectsResponseSchema,
+	},
+	"@get/container-tags/list": {
+		output: ListContainerTagsResponseSchema,
+	},
+	"@get/container-tags/:containerTag/profile": {
+		output: z.object({
+			profile: z.object({
+				static: z.array(z.string()).optional(),
+				dynamic: z.array(z.string()).optional(),
+			}),
+		}),
+		params: z.object({
+			containerTag: z.string(),
+		}),
+	},
+	"@patch/container-tags/:containerTag": {
+		input: UpdateContainerTagSettingsRequestSchema,
+		output: ContainerTagSettingsUpdateSchema,
+		params: z.object({
+			containerTag: z.string(),
+		}),
+	},
+	"@delete/container-tags/:containerTag": {
+		output: z.object({
+			success: z.boolean(),
+			containerTag: z.string(),
+			deletedDocumentsCount: z.number(),
+			deletedMemoriesCount: z.number(),
+		}),
+		params: z.object({
+			containerTag: z.string(),
+		}),
 	},
 	"@post/projects": {
 		input: CreateProjectSchema,
@@ -210,11 +371,87 @@ export const apiSchema = createSchema({
 			message: z.string(),
 		}),
 	},
+
+	// Weekly digest preferences
+	"@get/digests/preferences": {
+		output: z.object({ digestOptOut: z.boolean() }),
+	},
+	"@post/digests/preferences": {
+		input: z.object({ digestOptOut: z.boolean() }),
+		output: z.object({ digestOptOut: z.boolean() }),
+	},
+
+	// Weekly digest endpoints
+	"@get/digests": {
+		output: z.object({
+			digests: z.array(
+				z.object({
+					id: z.string(),
+					isoWeek: z.string(),
+					emailSubject: z.string().nullable(),
+					title: z.string().nullable(),
+					status: z.enum(["pending", "processing", "completed", "failed"]),
+					sentAt: z.string().nullable(),
+					generatedAt: z.string(),
+					highlightCount: z.number(),
+					memoryCount: z.number(),
+				}),
+			),
+			page: z.number(),
+			limit: z.number(),
+		}),
+		query: z.object({
+			page: z.number().optional(),
+			limit: z.number().optional(),
+		}),
+	},
+
+	"@get/digests/:id": {
+		output: z.object({
+			id: z.string(),
+			isoWeek: z.string(),
+			emailSubject: z.string().nullable(),
+			status: z.enum(["pending", "processing", "completed", "failed"]),
+			sentAt: z.string().nullable(),
+			generatedAt: z.string(),
+			digestData: z.object({
+				title: z.string(),
+				intro: z.string(),
+				highlights: z.array(
+					z.object({
+						id: z.string(),
+						title: z.string(),
+						content: z.string(),
+						format: z.enum(["paragraph", "bullets", "quote", "one_liner"]),
+						query: z.string(),
+						sourceDocumentIds: z.array(z.string()),
+					}),
+				),
+				featureRecommendations: z.array(
+					z.object({
+						feature: z.string(),
+						headline: z.string(),
+						body: z.string(),
+						ctaLabel: z.string(),
+						ctaUrl: z.string(),
+					}),
+				),
+				memoryCount: z.number(),
+				spaceCount: z.number(),
+			}),
+		}),
+	},
 })
 
 export const $fetch = createFetch({
 	baseURL: `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://api.supermemory.ai"}/v3`,
 	credentials: "include",
+	headers: { "X-App-Source": "nova" },
+	onRequest: (context: { headers: Headers }) => {
+		if (!context.headers.has("X-App-Source")) {
+			context.headers.set("X-App-Source", "nova")
+		}
+	},
 	retry: {
 		attempts: 3,
 		delay: 100,

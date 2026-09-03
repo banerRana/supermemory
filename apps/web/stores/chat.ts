@@ -7,7 +7,10 @@ import { indexedDBStorage } from "./indexeddb-storage"
 /**
  * Deep equality check for UIMessage arrays to prevent unnecessary state updates
  */
-export function areUIMessageArraysEqual(a: UIMessage[], b: UIMessage[]): boolean {
+export function areUIMessageArraysEqual(
+	a: UIMessage[],
+	b: UIMessage[],
+): boolean {
 	if (a === b) return true
 	if (a.length !== b.length) return false
 
@@ -24,9 +27,9 @@ export function areUIMessageArraysEqual(a: UIMessage[], b: UIMessage[]): boolean
 			return false
 		}
 
-		// Compare the entire message using JSON serialization as a fallback
-		// This handles all properties including parts, toolInvocations, etc.
-		if (JSON.stringify(msgA) !== JSON.stringify(msgB)) {
+		if (msgA.content !== msgB.content) return false
+
+		if (JSON.stringify(msgA.parts) !== JSON.stringify(msgB.parts)) {
 			return false
 		}
 	}

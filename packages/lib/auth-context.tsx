@@ -3,6 +3,7 @@
 import {
 	createContext,
 	type ReactNode,
+	useCallback,
 	useContext,
 	useEffect,
 	useState,
@@ -11,56 +12,203 @@ import { authClient, useSession } from "./auth"
 
 type Organization = typeof authClient.$Infer.ActiveOrganization
 type SessionData = NonNullable<ReturnType<typeof useSession>["data"]>
+type OrganizationListItem = NonNullable<
+	ReturnType<typeof authClient.useListOrganizations>["data"]
+>[number]
+
+const STORAGE_KEY = "supermemory-consumer-last-org-slug"
+
+// Reads ?org=<slug> from the URL once and removes it, so a deep link that
+// selects an org doesn't re-fire on refresh or back-navigation.
+function consumeRequestedOrgSlug(): string | null {
+	if (typeof window === "undefined") return null
+	const params = new URLSearchParams(window.location.search)
+	const slug = params.get("org")
+	if (!slug) return null
+	params.delete("org")
+	const qs = params.toString()
+	window.history.replaceState(
+		null,
+		"",
+		`${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`,
+	)
+	return slug
+}
 
 interface AuthContextType {
 	session: SessionData["session"] | null
 	user: SessionData["user"] | null
 	org: Organization | null
+	organizations: OrganizationListItem[] | null
+	isRestoring: boolean
+	isSessionPending: boolean
 	setActiveOrg: (orgSlug: string) => Promise<void>
+	clearActiveOrg: () => Promise<void>
+	updateOrgMetadata: (partial: Record<string, unknown>) => void
+	refetchActiveOrg: () => Promise<Organization | null>
+	refetchOrganizations: () => Promise<unknown>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-	const { data: session } = useSession()
+	const { data: session, isPending: isSessionPending } = useSession()
 	const [org, setOrg] = useState<Organization | null>(null)
-	const { data: orgs } = authClient.useListOrganizations()
+	const [isRestoring, setIsRestoring] = useState(true)
+	const {
+		data: orgsData,
+		refetch: refetchOrgsQuery,
+		isPending: orgsPending,
+	} = authClient.useListOrganizations()
 
-	const setActiveOrg = async (slug: string) => {
+	const organizations =
+		session?.session == null ? null : orgsPending ? null : (orgsData ?? [])
+
+	const refetchOrganizations = useCallback(
+		() => Promise.resolve(refetchOrgsQuery()),
+		[refetchOrgsQuery],
+	)
+
+	const setActiveOrg = useCallback(async (slug: string) => {
 		if (!slug) return
 
-		const activeOrg = await authClient.organization.setActive({
+		const res = await authClient.organization.setActive({
 			organizationSlug: slug,
 		})
-		setOrg(activeOrg)
-	}
+		setOrg(res?.data ?? null)
+		localStorage.setItem(STORAGE_KEY, slug)
+	}, [])
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: ignoring the setActiveOrg dependency
+	const clearActiveOrg = useCallback(async () => {
+		try {
+			await authClient.organization.setActive({ organizationId: null })
+		} catch {}
+		setOrg(null)
+		try {
+			localStorage.removeItem(STORAGE_KEY)
+		} catch {}
+	}, [])
+
+	const updateOrgMetadata = useCallback((partial: Record<string, unknown>) => {
+		setOrg((prev) => {
+			if (!prev) return prev
+			return {
+				...prev,
+				metadata: {
+					...prev.metadata,
+					...partial,
+				},
+			}
+		})
+	}, [])
+
+	const refetchActiveOrg = useCallback(async () => {
+		const full = await authClient.organization.getFullOrganization()
+		const nextOrg = full?.data ?? null
+		setOrg(nextOrg)
+		return nextOrg
+	}, [])
+
 	useEffect(() => {
-		if (session?.session.activeOrganizationId) {
-			authClient.organization
-				.getFullOrganization()
-				.then((org) => {
-					if (org.metadata?.isConsumer === true) {
-						console.log("Consumer organization:", org)
-					   setOrg(org)
-					} else {
-						console.log("ALl orgs:", orgs)
-						const consumerOrg = orgs?.find((o) => o.metadata?.isConsumer === true)
-						if (consumerOrg) {
-							setActiveOrg(consumerOrg.slug)
-						}
-					}
-				})
-				.catch((error) => {
-					// Silently handle organization fetch failures to prevent unhandled rejections
-					console.error("Failed to fetch organization:", error)
-				})
-		}
-	}, [session?.session.activeOrganizationId, orgs])
+		if (isSessionPending) return
 
-	// When a session exists and there is a pending login method recorded,
-	// promote it to the last-used method (successful login) and clear pending.
+		if (!session?.session) {
+			setIsRestoring(false)
+			setOrg(null)
+			return
+		}
+
+		if (orgsPending || orgsData === undefined) {
+			setIsRestoring(true)
+			return
+		}
+
+		const orgs = orgsData ?? []
+		let cancelled = false
+
+		const run = async () => {
+			try {
+				// OAuth consent owns org selection for the authorization transaction.
+				const shouldRestoreSavedOrg =
+					typeof window === "undefined" ||
+					window.location.pathname !== "/oauth/consent"
+
+				if (orgs.length === 0) {
+					if (!cancelled) setOrg(null)
+					return
+				}
+
+				const activeOrgId = session.session.activeOrganizationId
+
+				// Deep link (?org=<slug>) takes priority — used when arriving from
+				// the console. Strip the param so refresh/back doesn't re-trigger.
+				const requestedSlug = consumeRequestedOrgSlug()
+				if (requestedSlug) {
+					const match = orgs.find((o) => o.slug === requestedSlug)
+					if (match) {
+						if (activeOrgId === match.id) {
+							const full = await authClient.organization.getFullOrganization()
+							if (!cancelled) setOrg(full?.data ?? null)
+						} else {
+							await setActiveOrg(requestedSlug)
+						}
+						return
+					}
+				}
+
+				if (orgs.length === 1) {
+					const one = orgs[0]
+					if (!one) return
+					if (activeOrgId === one.id) {
+						const full = await authClient.organization.getFullOrganization()
+						if (!cancelled) setOrg(full?.data ?? null)
+					} else {
+						await setActiveOrg(one.slug)
+					}
+					return
+				}
+
+				if (shouldRestoreSavedOrg) {
+					const savedSlug = localStorage.getItem(STORAGE_KEY)
+					if (savedSlug) {
+						const match = orgs.find((o) => o.slug === savedSlug)
+						if (match) {
+							if (activeOrgId === match.id) {
+								const full = await authClient.organization.getFullOrganization()
+								if (!cancelled) setOrg(full?.data ?? null)
+							} else {
+								await setActiveOrg(savedSlug)
+							}
+							return
+						}
+						localStorage.removeItem(STORAGE_KEY)
+					}
+				}
+
+				if (activeOrgId) {
+					const fromList = orgs.find((o) => o.id === activeOrgId)
+					if (fromList) {
+						const full = await authClient.organization.getFullOrganization()
+						if (!cancelled) setOrg(full?.data ?? null)
+						return
+					}
+				}
+
+				const full = await authClient.organization.getFullOrganization()
+				if (!cancelled) setOrg(full?.data ?? null)
+			} catch (error) {
+				console.error("Failed to restore organization:", error)
+			} finally {
+				if (!cancelled) setIsRestoring(false)
+			}
+		}
+
+		void run()
+		return () => {
+			cancelled = true
+		}
+	}, [isSessionPending, session, orgsData, orgsPending, setActiveOrg])
+
 	useEffect(() => {
 		if (typeof window === "undefined") return
 		if (!session?.session) return
@@ -76,14 +224,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			if (pendingMethod) {
 				const now = Date.now()
 				const ts = pendingTsRaw ? Number.parseInt(pendingTsRaw, 10) : Number.NaN
-				const isFresh = Number.isFinite(ts) && now - ts < 10 * 60 * 1000 // 10 minutes TTL
+				const isFresh = Number.isFinite(ts) && now - ts < 10 * 60 * 1000
 
 				if (isFresh) {
 					localStorage.setItem("supermemory-last-login-method", pendingMethod)
 				}
 			}
 		} catch {}
-		// Always clear pending markers once a session is present
 		try {
 			localStorage.removeItem("supermemory-pending-login-method")
 			localStorage.removeItem("supermemory-pending-login-timestamp")
@@ -94,9 +241,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		<AuthContext.Provider
 			value={{
 				org,
+				organizations,
+				isRestoring,
+				isSessionPending,
 				session: session?.session ?? null,
 				user: session?.user ?? null,
 				setActiveOrg,
+				clearActiveOrg,
+				updateOrgMetadata,
+				refetchActiveOrg,
+				refetchOrganizations,
 			}}
 		>
 			{children}

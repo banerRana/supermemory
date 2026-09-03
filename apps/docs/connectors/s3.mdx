@@ -1,10 +1,10 @@
 ---
 title: "S3 Connector"
 description: "Connect Amazon S3 or S3-compatible storage to sync files into your Supermemory knowledge base"
-icon: "aws"
+icon: "database"
 ---
 
-Connect Amazon S3 buckets or S3-compatible storage services (MinIO, DigitalOcean Spaces, Cloudflare R2) to sync files into your Supermemory knowledge base.
+Connect Amazon S3 buckets or S3-compatible storage services (MinIO, DigitalOcean Spaces, Cloudflare R2, Tigris) to sync files into your Supermemory knowledge base.
 
 <Note>
 The S3 connector requires a **Scale Plan** or higher. You can also create S3 connections directly from the [Supermemory Console](https://console.supermemory.ai).
@@ -22,11 +22,13 @@ The S3 connector requires a **Scale Plan** or higher. You can also create S3 con
     });
 
     const connection = await client.connections.create('s3', {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-      bucket: 'my-documents-bucket',
-      region: 'us-east-1',
-      containerTags: ['org-123']
+      metadata: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+        bucket: 'my-documents-bucket',
+        region: 'us-east-1'
+      },
+      containerTag: 'org-123'
     });
     ```
   </Tab>
@@ -35,15 +37,17 @@ The S3 connector requires a **Scale Plan** or higher. You can also create S3 con
     from supermemory import Supermemory
     import os
 
-    client = Supermemory(api_key=os.environ.get("SUPERMEMORY_API_KEY"))
+    client = Supermemory(api_key=os.environ["SUPERMEMORY_API_KEY"])
 
     connection = client.connections.create(
         's3',
-        access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-        secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-        bucket='my-documents-bucket',
-        region='us-east-1',
-        container_tags=['org-123', 's3-sync']
+        metadata={
+            'accessKeyId': os.environ["AWS_ACCESS_KEY_ID"],
+            'secretAccessKey': os.environ["AWS_SECRET_ACCESS_KEY"],
+            'bucket': 'my-documents-bucket',
+            'region': 'us-east-1'
+        },
+        container_tag='org-123'
     )
     ```
   </Tab>
@@ -53,11 +57,13 @@ The S3 connector requires a **Scale Plan** or higher. You can also create S3 con
       -H "Authorization: Bearer $SUPERMEMORY_API_KEY" \
       -H "Content-Type: application/json" \
       -d '{
-        "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
-        "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        "bucket": "my-documents-bucket",
-        "region": "us-east-1",
-        "containerTags": ["org-123"]
+        "metadata": {
+          "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
+          "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+          "bucket": "my-documents-bucket",
+          "region": "us-east-1"
+        },
+        "containerTag": "org-123"
       }'
     ```
   </Tab>
@@ -65,39 +71,68 @@ The S3 connector requires a **Scale Plan** or higher. You can also create S3 con
 
 ## Configuration Options
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `accessKeyId` | Yes | AWS access key ID or S3-compatible service key |
-| `secretAccessKey` | Yes | AWS secret access key |
-| `bucket` | Yes | S3 bucket name |
-| `region` | Yes | AWS region (e.g., `us-east-1`) |
-| `endpoint` | No | Custom endpoint for S3-compatible services |
-| `prefix` | No | Key prefix filter (e.g., `documents/`) |
-| `containerTagRegex` | No | Regex to extract container tags from file paths |
-| `containerTags` | No | Tags for organizing connections |
-| `documentLimit` | No | Maximum documents to sync (default: 10,000) |
+For S3, provider-specific connection fields are passed inside the top-level `metadata` object. General connection options stay top-level.
+
+| Parameter | Location | Required | Description |
+|-----------|----------|----------|-------------|
+| `accessKeyId` | `metadata.accessKeyId` | Yes | AWS access key ID or S3-compatible service key |
+| `secretAccessKey` | `metadata.secretAccessKey` | Yes | AWS secret access key |
+| `bucket` | `metadata.bucket` | Yes | S3 bucket name |
+| `region` | `metadata.region` | Yes | AWS region (e.g., `us-east-1`). Use `auto` for S3-compatible providers that don't expose AWS-style regions (MinIO, R2, Tigris). |
+| `endpoint` | `metadata.endpoint` | No | Custom endpoint for S3-compatible services |
+| `prefix` | `metadata.prefix` | No | Key prefix filter (e.g., `documents/`) |
+| `containerTagRegex` | `metadata.containerTagRegex` | No | Regex to extract container tags from file paths |
+| `containerTag` | top-level | No | Tag for organizing this connection |
+| `documentLimit` | top-level | No | Maximum documents to sync (default: 10,000) |
+
+<Note>
+In the Python SDK, use `container_tags` for the top-level option, but keep S3 metadata keys in camelCase: `accessKeyId`, `secretAccessKey`, and `containerTagRegex`.
+</Note>
 
 ## S3-Compatible Services
 
-Use a custom `endpoint` to connect to S3-compatible storage:
+Use `metadata.endpoint` to connect to S3-compatible storage. These services don't use AWS-style regions, so set `metadata.region` to `auto` — the value is still required for request signing but the service ignores it.
 
 ```typescript
 // MinIO
 const connection = await client.connections.create('s3', {
-  accessKeyId: 'minio-key',
-  secretAccessKey: 'minio-secret',
-  bucket: 'my-bucket',
-  region: 'us-east-1',
-  endpoint: 'https://minio.example.com',
-  containerTags: ['minio-sync']
+  metadata: {
+    accessKeyId: 'minio-key',
+    secretAccessKey: 'minio-secret',
+    bucket: 'my-bucket',
+    region: 'auto',
+    endpoint: 'https://minio.example.com'
+  },
+  containerTag: 'minio-sync'
 });
-
-// DigitalOcean Spaces
-endpoint: 'https://nyc3.digitaloceanspaces.com'
-
-// Cloudflare R2
-endpoint: 'https://ACCOUNT_ID.r2.cloudflarestorage.com'
 ```
+
+Common S3-compatible endpoint values:
+
+| Service | `metadata.endpoint` | `metadata.region` |
+|---------|----------------------|-------------------|
+| DigitalOcean Spaces | `https://nyc3.digitaloceanspaces.com` | `nyc3` |
+| Cloudflare R2 | `https://<account-id>.r2.cloudflarestorage.com` | `auto` |
+| Tigris | `https://t3.storage.dev` | `auto` |
+
+Cloudflare R2 example:
+
+```typescript
+const connection = await client.connections.create('s3', {
+  metadata: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    bucket: 'my-bucket',
+    region: 'auto',
+    endpoint: 'https://<account-id>.r2.cloudflarestorage.com'
+  },
+  containerTag: 'r2-sync'
+});
+```
+
+<Note>
+For S3-compatible services, `metadata.endpoint` is the base S3 endpoint. Do not include the bucket name in the endpoint URL; pass the bucket separately as `metadata.bucket`.
+</Note>
 
 ## Prefix Filtering
 
@@ -105,11 +140,14 @@ Sync only files within a specific path:
 
 ```typescript
 const connection = await client.connections.create('s3', {
-  // ... credentials
-  bucket: 'company-data',
-  region: 'us-east-1',
-  prefix: 'documents/engineering/',  // Only syncs files under this path
-  containerTags: ['engineering-docs']
+  metadata: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    bucket: 'company-data',
+    region: 'us-east-1',
+    prefix: 'documents/engineering/' // Only syncs files under this path
+  },
+  containerTag: 'engineering-docs'
 });
 ```
 
@@ -119,11 +157,14 @@ Extract container tags from S3 key paths for multi-tenant setups:
 
 ```typescript
 const connection = await client.connections.create('s3', {
-  // ... credentials
-  bucket: 'user-files',
-  region: 'us-east-1',
-  containerTagRegex: 'users/(?<userId>[^/]+)/',
-  containerTags: ['user-files']
+  metadata: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    bucket: 'user-files',
+    region: 'us-east-1',
+    containerTagRegex: 'users/(?<userId>[^/]+)/'
+  },
+  containerTag: 'user-files'
 });
 
 // File: users/user-123/documents/notes.md → container tag: user-123
@@ -153,7 +194,7 @@ The regex must contain a named capture group `(?<userId>...)` and be less than 2
 </Tabs>
 
 <Warning>
-Deleting a connection removes all synced documents from Supermemory.
+By default, deleting a connection removes all synced documents from Supermemory. To keep documents, pass `deleteDocuments=false` as a query parameter: `DELETE /v3/connections/:id?deleteDocuments=false`
 </Warning>
 
 ### Manual Sync

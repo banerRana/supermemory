@@ -1,439 +1,630 @@
-"use client"
-
-import {
-	calculateSemanticSimilarity,
-	getConnectionVisualProps,
-	getMagicalConnectionColor,
-} from "@/lib/similarity"
-import { useMemo, useRef, useEffect } from "react"
-import { colors, LAYOUT_CONSTANTS, SIMILARITY_CONFIG } from "@/constants"
+import { useEffect, useMemo, useRef } from "react"
 import type {
-	DocumentsResponse,
-	DocumentWithMemories,
+	DocumentNodeData,
+	GraphApiDocument,
+	GraphApiMemory,
 	GraphEdge,
 	GraphNode,
-	MemoryEntry,
-	MemoryRelation,
-} from "@/types"
+	GraphThemeColors,
+	MemoryNodeData,
+} from "../types"
+import { hashString } from "../utils/hash"
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+const ONE_DAY_MS = 24 * 60 * 60 * 1000
+const MEMORY_ORBIT_BASE = 260
+const MEMORY_ORBIT_GAP = 110
+const MEMORY_ORBIT_SPACING = 84
+const APPEND_CLUSTER_RADIUS = MEMORY_ORBIT_BASE + 180
+const APPEND_AREA_GAP = 160
+const APPEND_CANDIDATES_PER_RING = 18
+const APPEND_MAX_RINGS = 8
+const APPEND_SPATIAL_CELL_SIZE = APPEND_CLUSTER_RADIUS + APPEND_AREA_GAP + 120
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+const CLUSTER_COLORS = [
+	"#58C7E8",
+	"#E7BC52",
+	"#74D680",
+	"#D47B75",
+	"#A789E8",
+	"#62C5A8",
+	"#74ABD8",
+	"#C78AC8",
+	"#D18A58",
+	"#8BCB6F",
+]
+
+export interface ClusterAssignment {
+	key: string
+	color: string
+	size: number
+}
+
+export function getMemoryBorderColor(
+	mem: GraphApiMemory,
+	colors: GraphThemeColors,
+): string {
+	if (mem.isForgotten) return colors.memBorderForgotten
+	if (mem.forgetAfter) {
+		const msLeft = new Date(mem.forgetAfter).getTime() - Date.now()
+		if (msLeft > 0 && msLeft < SEVEN_DAYS_MS) return colors.memBorderExpiring
+	}
+	const age = Date.now() - new Date(mem.createdAt).getTime()
+	if (age < ONE_DAY_MS) return colors.memBorderRecent
+	return colors.memStrokeDefault
+}
+
+export function getEdgeVisualProps(edgeType: string) {
+	switch (edgeType) {
+		case "derives":
+			return { opacity: 0.4, thickness: 1.2 }
+		case "updates":
+			return { opacity: 0.48, thickness: 1.45 }
+		case "extends":
+			return { opacity: 0.16, thickness: 0.8 }
+		default:
+			return { opacity: 0.4, thickness: 1.2 }
+	}
+}
+
+export function getMemoryOrbitOffset(
+	index: number,
+	count: number,
+	memoryId: string,
+) {
+	const safeCount = Math.max(1, count)
+	let remaining = index
+	let ring = 0
+	let ringStart = 0
+	let ringCapacity = getMemoryRingCapacity(ring)
+
+	while (remaining >= ringCapacity) {
+		remaining -= ringCapacity
+		ringStart += ringCapacity
+		ring++
+		ringCapacity = getMemoryRingCapacity(ring)
+	}
+
+	const radius =
+		MEMORY_ORBIT_BASE +
+		ring * MEMORY_ORBIT_GAP +
+		hashToUnit(`${memoryId}-r`) * Math.min(54, MEMORY_ORBIT_GAP * 0.45)
+	const angleStep =
+		(2 * Math.PI) / Math.max(1, Math.min(ringCapacity, safeCount))
+	const phase = hashToUnit(`${memoryId}-phase`) * angleStep * 0.75
+	const angle =
+		(remaining + ringStart * 0.17) * angleStep + ring * GOLDEN_ANGLE + phase
+
+	return {
+		x: Math.cos(angle) * radius,
+		y: Math.sin(angle) * radius,
+		radius,
+	}
+}
+
+function getMemoryRingCapacity(ring: number): number {
+	const radius = MEMORY_ORBIT_BASE + ring * MEMORY_ORBIT_GAP
+	return Math.max(8, Math.floor((2 * Math.PI * radius) / MEMORY_ORBIT_SPACING))
+}
+
+export function getClusterColor(key: string): string {
+	return CLUSTER_COLORS[hashString(key) % CLUSTER_COLORS.length] as string
+}
+
+export function computeClusterAssignments(
+	documents: GraphApiDocument[],
+): Map<string, ClusterAssignment> {
+	const adjacency = new Map<string, Set<string>>()
+	const docByMemory = new Map<string, string>()
+	const orderByMemory = new Map<string, number>()
+	const allMemoryIds = new Set<string>()
+	let order = 0
+
+	for (const doc of documents) {
+		let firstMemoryId: string | null = null
+		for (const mem of doc.memories) {
+			allMemoryIds.add(mem.id)
+			docByMemory.set(mem.id, doc.id)
+			orderByMemory.set(mem.id, order++)
+			ensureAdjacency(adjacency, mem.id)
+
+			if (!firstMemoryId) {
+				firstMemoryId = mem.id
+			} else {
+				connect(adjacency, firstMemoryId, mem.id)
+			}
+		}
+	}
+
+	for (const doc of documents) {
+		for (const mem of doc.memories) {
+			for (const targetId of Object.keys(getMemoryRelationTargets(mem))) {
+				if (!allMemoryIds.has(targetId)) continue
+				connect(adjacency, mem.id, targetId)
+			}
+		}
+	}
+
+	const assignments = new Map<string, ClusterAssignment>()
+	const visited = new Set<string>()
+	const memoryIdsByOrder = [...allMemoryIds].sort(
+		(a, b) => (orderByMemory.get(a) ?? 0) - (orderByMemory.get(b) ?? 0),
+	)
+
+	for (const startId of memoryIdsByOrder) {
+		if (visited.has(startId)) continue
+
+		const component: string[] = []
+		const queue = [startId]
+		visited.add(startId)
+
+		while (queue.length > 0) {
+			const id = queue.shift() as string
+			component.push(id)
+			for (const nextId of adjacency.get(id) ?? []) {
+				if (visited.has(nextId)) continue
+				visited.add(nextId)
+				queue.push(nextId)
+			}
+		}
+
+		component.sort(
+			(a, b) => (orderByMemory.get(a) ?? 0) - (orderByMemory.get(b) ?? 0),
+		)
+		const firstId = component[0] ?? startId
+		const docIds = new Set(component.map((id) => docByMemory.get(id)))
+		const firstDocId = docByMemory.get(firstId) ?? "unknown"
+		const key =
+			docIds.size <= 1
+				? `doc:${firstDocId}`
+				: `relation:${firstDocId}:${firstId}`
+		const assignment = {
+			key,
+			color: getClusterColor(key),
+			size: component.length,
+		}
+
+		for (const id of component) assignments.set(id, assignment)
+	}
+
+	return assignments
+}
+
+function getMemoryRelationTargets(mem: GraphApiMemory): Record<string, string> {
+	if (
+		mem.memoryRelations &&
+		typeof mem.memoryRelations === "object" &&
+		Object.keys(mem.memoryRelations).length > 0
+	) {
+		return mem.memoryRelations
+	}
+	if (mem.parentMemoryId) return { [mem.parentMemoryId]: "updates" }
+	return {}
+}
+
+function getDocumentClusterAssignment(
+	doc: GraphApiDocument,
+	assignments: Map<string, ClusterAssignment>,
+): ClusterAssignment {
+	const counts = new Map<
+		string,
+		{ assignment: ClusterAssignment; count: number }
+	>()
+	for (const mem of doc.memories) {
+		const assignment = assignments.get(mem.id)
+		if (!assignment) continue
+		const entry = counts.get(assignment.key)
+		if (entry) {
+			entry.count++
+		} else {
+			counts.set(assignment.key, { assignment, count: 1 })
+		}
+	}
+
+	let best: { assignment: ClusterAssignment; count: number } | null = null
+	for (const entry of counts.values()) {
+		if (!best || entry.count > best.count) best = entry
+	}
+
+	return (
+		best?.assignment ?? {
+			key: `doc:${doc.id}`,
+			color: getClusterColor(`doc:${doc.id}`),
+			size: 1,
+		}
+	)
+}
+
+function getMemoryNodeBorderColor(
+	mem: GraphApiMemory,
+	colors: GraphThemeColors,
+	clusterColor?: string,
+): string {
+	const semanticColor = getMemoryBorderColor(mem, colors)
+	return semanticColor === colors.memStrokeDefault && clusterColor
+		? clusterColor
+		: semanticColor
+}
+
+function ensureAdjacency(map: Map<string, Set<string>>, id: string) {
+	if (!map.has(id)) map.set(id, new Set())
+}
+
+function connect(map: Map<string, Set<string>>, a: string, b: string) {
+	ensureAdjacency(map, a)
+	ensureAdjacency(map, b)
+	map.get(a)?.add(b)
+	map.get(b)?.add(a)
+}
+
+/**
+ * Simple deterministic hash of a string to a number in [0, 1).
+ * Used for initial node placement so the force simulation has a
+ * deterministic starting layout.
+ */
+function hashToUnit(str: string): number {
+	return (hashString(str) % 10000) / 10000
+}
+
+export function getNodeBounds(nodes: GraphNode[]) {
+	if (nodes.length === 0) return null
+
+	let minX = Number.POSITIVE_INFINITY
+	let minY = Number.POSITIVE_INFINITY
+	let maxX = Number.NEGATIVE_INFINITY
+	let maxY = Number.NEGATIVE_INFINITY
+
+	for (const node of nodes) {
+		const radius = node.size / 2
+		minX = Math.min(minX, node.x - radius)
+		minY = Math.min(minY, node.y - radius)
+		maxX = Math.max(maxX, node.x + radius)
+		maxY = Math.max(maxY, node.y + radius)
+	}
+
+	return {
+		minX,
+		minY,
+		maxX,
+		maxY,
+		centerX: (minX + maxX) / 2,
+		centerY: (minY + maxY) / 2,
+	}
+}
+
+type NodeBounds = NonNullable<ReturnType<typeof getNodeBounds>>
+
+export function getAppendPosition(
+	existingNodes: GraphNode[],
+	appendIndex: number,
+	canvasWidth: number,
+	canvasHeight: number,
+	baseBounds?: NodeBounds | null,
+	spatialGrid?: Map<string, GraphNode[]>,
+) {
+	const bounds = baseBounds ?? getNodeBounds(existingNodes)
+	if (!bounds) {
+		return { x: canvasWidth / 2, y: canvasHeight / 2 }
+	}
+
+	const candidateGrid = spatialGrid ?? buildAppendSpatialGrid(existingNodes)
+	const boundsWidth = bounds.maxX - bounds.minX
+	const boundsHeight = bounds.maxY - bounds.minY
+	const baseRadiusX = boundsWidth / 2 + APPEND_CLUSTER_RADIUS + APPEND_AREA_GAP
+	const baseRadiusY = boundsHeight / 2 + APPEND_CLUSTER_RADIUS + APPEND_AREA_GAP
+	const ringStep = APPEND_CLUSTER_RADIUS + APPEND_AREA_GAP
+	const seed = existingNodes.length + appendIndex
+
+	for (let ring = 0; ring < APPEND_MAX_RINGS; ring++) {
+		const radiusX = baseRadiusX + ring * ringStep
+		const radiusY = baseRadiusY + ring * ringStep
+
+		for (let attempt = 0; attempt < APPEND_CANDIDATES_PER_RING; attempt++) {
+			const angle =
+				(seed + attempt + ring * APPEND_CANDIDATES_PER_RING) * GOLDEN_ANGLE
+			const candidate = {
+				x: bounds.centerX + Math.cos(angle) * radiusX,
+				y: bounds.centerY + Math.sin(angle) * radiusY,
+			}
+
+			if (isAppendCandidateOpen(candidate, candidateGrid)) {
+				return candidate
+			}
+		}
+	}
+
+	const fallbackAngle = seed * GOLDEN_ANGLE
+	const fallbackRadiusX = baseRadiusX + APPEND_MAX_RINGS * ringStep
+	const fallbackRadiusY = baseRadiusY + APPEND_MAX_RINGS * ringStep
+	return {
+		x: bounds.centerX + Math.cos(fallbackAngle) * fallbackRadiusX,
+		y: bounds.centerY + Math.sin(fallbackAngle) * fallbackRadiusY,
+	}
+}
+
+function isAppendCandidateOpen(
+	candidate: { x: number; y: number },
+	spatialGrid: Map<string, GraphNode[]>,
+) {
+	const cellX = getAppendSpatialCell(candidate.x)
+	const cellY = getAppendSpatialCell(candidate.y)
+	for (let x = cellX - 1; x <= cellX + 1; x++) {
+		for (let y = cellY - 1; y <= cellY + 1; y++) {
+			const nodes = spatialGrid.get(getAppendSpatialKey(x, y))
+			if (!nodes) continue
+			for (const node of nodes) {
+				const minDistance =
+					APPEND_CLUSTER_RADIUS + node.size / 2 + APPEND_AREA_GAP
+				const dx = candidate.x - node.x
+				if (Math.abs(dx) > minDistance) continue
+				const dy = candidate.y - node.y
+				if (Math.abs(dy) > minDistance) continue
+				if (dx * dx + dy * dy < minDistance * minDistance) return false
+			}
+		}
+	}
+
+	return true
+}
+
+function buildAppendSpatialGrid(nodes: GraphNode[]): Map<string, GraphNode[]> {
+	const grid = new Map<string, GraphNode[]>()
+	for (const node of nodes) {
+		addAppendSpatialNode(grid, node)
+	}
+	return grid
+}
+
+function addAppendSpatialNode(
+	grid: Map<string, GraphNode[]>,
+	node: GraphNode,
+): void {
+	const key = getAppendSpatialKey(
+		getAppendSpatialCell(node.x),
+		getAppendSpatialCell(node.y),
+	)
+	const bucket = grid.get(key)
+	if (bucket) {
+		bucket.push(node)
+	} else {
+		grid.set(key, [node])
+	}
+}
+
+function getAppendSpatialCell(value: number): number {
+	return Math.floor(value / APPEND_SPATIAL_CELL_SIZE)
+}
+
+function getAppendSpatialKey(x: number, y: number): string {
+	return `${x}:${y}`
+}
+
+/**
+ * Pure function that computes graph edges from documents.
+ * Extracted from the hook for testability.
+ */
+export function computeEdges(documents: GraphApiDocument[]): GraphEdge[] {
+	if (!documents || documents.length === 0) return []
+
+	const result: GraphEdge[] = []
+	const allNodeIds = new Set<string>()
+	for (const doc of documents) {
+		allNodeIds.add(doc.id)
+		for (const mem of doc.memories) allNodeIds.add(mem.id)
+	}
+
+	// 1. Derives edges: document -> memory (structural)
+	for (const doc of documents) {
+		for (const mem of doc.memories) {
+			result.push({
+				id: `dm-${doc.id}-${mem.id}`,
+				source: doc.id,
+				target: mem.id,
+				visualProps: getEdgeVisualProps("derives"),
+				edgeType: "derives",
+			})
+		}
+	}
+
+	// 2. Memory-to-memory relation edges from backend data.
+	//    Uses memoryRelations (Record<targetId, relationType>) as primary source,
+	//    falls back to parentMemoryId for legacy data.
+	for (const doc of documents) {
+		for (const mem of doc.memories) {
+			const relations = getMemoryRelationTargets(mem)
+
+			for (const [targetId, relationType] of Object.entries(relations)) {
+				if (!allNodeIds.has(targetId)) continue
+				const edgeType =
+					relationType === "updates" ||
+					relationType === "extends" ||
+					relationType === "derives"
+						? relationType
+						: "updates"
+				result.push({
+					id: `rel-${targetId}-${mem.id}`,
+					source: targetId,
+					target: mem.id,
+					visualProps: getEdgeVisualProps(edgeType),
+					edgeType,
+				})
+			}
+		}
+	}
+
+	return result
+}
 
 export function useGraphData(
-	data: DocumentsResponse | null,
-	selectedSpace: string,
-	nodePositions: Map<string, { x: number; y: number; parentDocId?: string; offsetX?: number; offsetY?: number }>,
+	documents: GraphApiDocument[],
 	draggingNodeId: string | null,
-	memoryLimit?: number,
-	maxNodes?: number,
+	canvasWidth: number,
+	canvasHeight: number,
+	colors: GraphThemeColors,
 ) {
-	// Cache nodes to preserve d3-force mutations (x, y, vx, vy, fx, fy)
 	const nodeCache = useRef<Map<string, GraphNode>>(new Map())
 
-	// Cleanup nodeCache to prevent memory leak
-	useEffect(() => {
-		if (!data?.documents) return
-
-		// Build set of current node IDs
-		const currentNodeIds = new Set<string>()
-		data.documents.forEach((doc) => {
-			currentNodeIds.add(doc.id)
-			doc.memoryEntries.forEach((mem) => {
-				currentNodeIds.add(`${mem.id}`)
-			})
-		})
-
-		// Remove stale nodes from cache
-		for (const [id] of nodeCache.current.entries()) {
-			if (!currentNodeIds.has(id)) {
-				nodeCache.current.delete(id)
-			}
+	const graphData = useMemo<{
+		nodes: GraphNode[]
+		cache: Map<string, GraphNode>
+	}>(() => {
+		if (!documents || documents.length === 0) {
+			return { nodes: [], cache: new Map<string, GraphNode>() }
 		}
-	}, [data, selectedSpace])
 
-	// Memo 1: Filter documents by selected space and apply node limits
-	const filteredDocuments = useMemo(() => {
-		if (!data?.documents) return []
+		const currentIds = new Set<string>()
+		for (const doc of documents) {
+			currentIds.add(doc.id)
+			for (const mem of doc.memories) currentIds.add(mem.id)
+		}
 
-		// Sort documents by most recent first
-		const sortedDocs = [...data.documents].sort((a, b) => {
-			const dateA = new Date(a.updatedAt || a.createdAt).getTime()
-			const dateB = new Date(b.updatedAt || b.createdAt).getTime()
-			return dateB - dateA // Most recent first
-		})
+		const previousCache = nodeCache.current
+		const nextCache = new Map<string, GraphNode>()
+		const appendPlacementNodes = Array.from(previousCache.values()).filter(
+			(node) => currentIds.has(node.id),
+		)
+		const shouldAppendNewNodes = appendPlacementNodes.length > 0
+		const appendBaseBounds = shouldAppendNewNodes
+			? getNodeBounds(appendPlacementNodes)
+			: null
+		const appendSpatialGrid =
+			shouldAppendNewNodes && appendBaseBounds
+				? buildAppendSpatialGrid(appendPlacementNodes)
+				: null
+		let appendIndex = 0
+		const clusterAssignments = computeClusterAssignments(documents)
 
-		// Filter by space and prepare documents
-		let processedDocs = sortedDocs
-			.map((doc) => {
-				let memories =
-					selectedSpace === "all"
-						? doc.memoryEntries
-						: doc.memoryEntries.filter(
-								(memory) =>
-									(memory.spaceContainerTag ?? memory.spaceId ?? "default") ===
-									selectedSpace,
+		const result: GraphNode[] = []
+		// Spiral layout: documents form a compact spiral core, memories orbit
+		// around their parent documents. The force simulation then gently
+		// pushes memories outward to create the constellation/starburst effect.
+		const cx = canvasWidth / 2
+		const cy = canvasHeight / 2
+		const docCount = documents.length
+		// Wide spiral so documents start well-separated. The simulation
+		// refines positions but the initial spread prevents clustering.
+		const spiralScale = Math.sqrt(docCount) * 60
+		// Golden angle (~137.5 deg) produces optimal packing in a spiral
+		const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+
+		for (let docIdx = 0; docIdx < docCount; docIdx++) {
+			const doc = documents[docIdx]
+			const docCluster = getDocumentClusterAssignment(doc, clusterAssignments)
+			const angle = docIdx * goldenAngle
+			const radius = spiralScale * Math.sqrt((docIdx + 1) / docCount)
+			const initialX = cx + Math.cos(angle) * radius
+			const initialY = cy + Math.sin(angle) * radius
+
+			const previousDocNode = previousCache.get(doc.id)
+			const docData: DocumentNodeData = {
+				id: doc.id,
+				title: doc.title,
+				summary: doc.summary,
+				type: doc.documentType,
+				createdAt: doc.createdAt,
+				updatedAt: doc.updatedAt,
+				memories: doc.memories,
+			}
+
+			let docNode: GraphNode
+			if (previousDocNode) {
+				docNode = {
+					...previousDocNode,
+					data: docData,
+					borderColor: docCluster.color,
+					clusterKey: docCluster.key,
+					clusterColor: docCluster.color,
+					isDragging: draggingNodeId === doc.id,
+				}
+			} else {
+				const appendPosition =
+					shouldAppendNewNodes && appendBaseBounds && appendSpatialGrid
+						? getAppendPosition(
+								appendPlacementNodes,
+								appendIndex++,
+								canvasWidth,
+								canvasHeight,
+								appendBaseBounds,
+								appendSpatialGrid,
 							)
+						: null
 
-				// Sort memories by relevance score (if available) or recency
-				memories = memories.sort((a, b) => {
-					// Prioritize sourceRelevanceScore if available
-					if (a.sourceRelevanceScore != null && b.sourceRelevanceScore != null) {
-						return b.sourceRelevanceScore - a.sourceRelevanceScore // Higher score first
-					}
-					// Fall back to most recent
-					const dateA = new Date(a.updatedAt || a.createdAt).getTime()
-					const dateB = new Date(b.updatedAt || b.createdAt).getTime()
-					return dateB - dateA // Most recent first
-				})
-
-				return {
-					...doc,
-					memoryEntries: memories,
+				docNode = {
+					id: doc.id,
+					type: "document",
+					x: appendPosition?.x ?? initialX,
+					y: appendPosition?.y ?? initialY,
+					data: docData,
+					size: 50,
+					borderColor: docCluster.color,
+					clusterKey: docCluster.key,
+					clusterColor: docCluster.color,
+					isHovered: false,
+					isDragging: false,
 				}
-			})
+				if (appendSpatialGrid) {
+					appendPlacementNodes.push(docNode)
+					addAppendSpatialNode(appendSpatialGrid, docNode)
+				}
+			}
+			nextCache.set(doc.id, docNode)
+			result.push(docNode)
 
-		// Apply maxNodes limit using Option B (dynamic cap per document)
-		if (maxNodes && maxNodes > 0) {
-			const totalDocs = processedDocs.length
-			if (totalDocs > 0) {
-				// Calculate memories per document to stay within maxNodes budget
-				const memoriesPerDoc = Math.floor(maxNodes / totalDocs)
+			const memCount = doc.memories.length
+			for (let i = 0; i < memCount; i++) {
+				const mem = doc.memories[i]
+				if (!mem) continue
+				const previousMemNode = previousCache.get(mem.id)
+				const memData: MemoryNodeData = {
+					...mem,
+					documentId: doc.id,
+					content: mem.memory,
+				}
+				const cluster = clusterAssignments.get(mem.id)
 
-				// If we need to limit, slice memories for each document
-				if (memoriesPerDoc > 0) {
-					let totalNodes = 0
-					processedDocs = processedDocs.map((doc) => {
-						// Limit memories to calculated amount per doc
-						const limitedMemories = doc.memoryEntries.slice(0, memoriesPerDoc)
-						totalNodes += limitedMemories.length
-						return {
-							...doc,
-							memoryEntries: limitedMemories,
-						}
-					})
-
-					// If we still have budget left, distribute remaining nodes to first docs
-					let remainingBudget = maxNodes - totalNodes
-					if (remainingBudget > 0) {
-						for (let i = 0; i < processedDocs.length && remainingBudget > 0; i++) {
-							const doc = processedDocs[i]
-							if (!doc) continue
-							const originalDoc = sortedDocs.find(d => d.id === doc.id)
-							if (!originalDoc) continue
-
-							const currentMemCount = doc.memoryEntries.length
-							const originalMemCount = originalDoc.memoryEntries.filter(
-								m => selectedSpace === "all" ||
-								(m.spaceContainerTag ?? m.spaceId ?? "default") === selectedSpace
-							).length
-
-							// Can we add more memories to this doc?
-							const canAdd = originalMemCount - currentMemCount
-							if (canAdd > 0) {
-								const toAdd = Math.min(canAdd, remainingBudget)
-								const additionalMems = doc.memoryEntries.slice(0, currentMemCount + toAdd)
-								processedDocs[i] = {
-									...doc,
-									memoryEntries: originalDoc.memoryEntries
-										.filter(m => selectedSpace === "all" ||
-											(m.spaceContainerTag ?? m.spaceId ?? "default") === selectedSpace)
-										.sort((a, b) => {
-											if (a.sourceRelevanceScore != null && b.sourceRelevanceScore != null) {
-												return b.sourceRelevanceScore - a.sourceRelevanceScore
-											}
-											const dateA = new Date(a.updatedAt || a.createdAt).getTime()
-											const dateB = new Date(b.updatedAt || b.createdAt).getTime()
-											return dateB - dateA
-										})
-										.slice(0, currentMemCount + toAdd)
-								}
-								remainingBudget -= toAdd
-							}
-						}
+				let memNode: GraphNode
+				if (previousMemNode) {
+					memNode = {
+						...previousMemNode,
+						data: memData,
+						borderColor: getMemoryNodeBorderColor(mem, colors, cluster?.color),
+						clusterKey: cluster?.key ?? null,
+						clusterColor: cluster?.color ?? null,
+						isDragging: draggingNodeId === mem.id,
 					}
 				} else {
-					// If memoriesPerDoc is 0, we need to limit the number of documents shown
-					// Show at least 1 memory per document, up to maxNodes documents
-					processedDocs = processedDocs.slice(0, maxNodes).map((doc) => ({
-						...doc,
-						memoryEntries: doc.memoryEntries.slice(0, 1),
-					}))
-				}
-			}
-		}
-		// Apply legacy memoryLimit if provided and a specific space is selected
-		else if (selectedSpace !== "all" && memoryLimit && memoryLimit > 0) {
-			processedDocs = processedDocs.map((doc) => ({
-				...doc,
-				memoryEntries: doc.memoryEntries.slice(0, memoryLimit),
-			}))
-		}
-
-		return processedDocs
-	}, [data, selectedSpace, memoryLimit, maxNodes])
-
-	// Memo 2: Calculate similarity edges using k-NN approach
-	const similarityEdges = useMemo(() => {
-		const edges: GraphEdge[] = []
-
-		// k-NN: Each document compares with k neighbors (configurable)
-		const { maxComparisonsPerDoc, threshold } = SIMILARITY_CONFIG
-
-		for (let i = 0; i < filteredDocuments.length; i++) {
-			const docI = filteredDocuments[i]
-			if (!docI) continue
-
-			// Only compare with next k documents (k-nearest neighbors approach)
-			const endIdx = Math.min(
-				i + maxComparisonsPerDoc + 1,
-				filteredDocuments.length,
-			)
-
-			for (let j = i + 1; j < endIdx; j++) {
-				const docJ = filteredDocuments[j]
-				if (!docJ) continue
-
-				const sim = calculateSemanticSimilarity(
-					docI.summaryEmbedding ? Array.from(docI.summaryEmbedding) : null,
-					docJ.summaryEmbedding ? Array.from(docJ.summaryEmbedding) : null,
-				)
-
-				if (sim > threshold) {
-					edges.push({
-						id: `doc-doc-${docI.id}-${docJ.id}`,
-						source: docI.id,
-						target: docJ.id,
-						similarity: sim,
-						visualProps: getConnectionVisualProps(sim),
-						color: getMagicalConnectionColor(sim, 200),
-						edgeType: "doc-doc",
-					})
-				}
-			}
-		}
-
-		return edges
-	}, [filteredDocuments])
-
-	// Memo 3: Build full graph data (nodes + edges)
-	return useMemo(() => {
-		if (!data?.documents || filteredDocuments.length === 0) {
-			return { nodes: [], edges: [] }
-		}
-
-		const allNodes: GraphNode[] = []
-		const allEdges: GraphEdge[] = []
-
-		// Group documents by space for better clustering
-		const documentsBySpace = new Map<string, typeof filteredDocuments>()
-		filteredDocuments.forEach((doc) => {
-			const docSpace =
-				doc.memoryEntries[0]?.spaceContainerTag ??
-				doc.memoryEntries[0]?.spaceId ??
-				"default"
-			if (!documentsBySpace.has(docSpace)) {
-				documentsBySpace.set(docSpace, [])
-			}
-			const spaceDocsArr = documentsBySpace.get(docSpace)
-			if (spaceDocsArr) {
-				spaceDocsArr.push(doc)
-			}
-		})
-
-		// Enhanced Layout with Space Separation
-		const { centerX, centerY, clusterRadius } =
-			LAYOUT_CONSTANTS
-
-		/* 1. Build DOCUMENT nodes with space-aware clustering */
-		const documentNodes: GraphNode[] = []
-		let spaceIndex = 0
-
-		documentsBySpace.forEach((spaceDocs) => {
-			spaceDocs.forEach((doc, docIndex) => {
-				// Simple grid-like layout that physics will naturally organize
-				// Start documents near the center with some random offset
-				const gridSize = Math.ceil(Math.sqrt(spaceDocs.length))
-				const row = Math.floor(docIndex / gridSize)
-				const col = docIndex % gridSize
-
-				// Loose grid spacing - physics will organize it better
-				const spacing = 200
-				const defaultX = centerX + (col - gridSize / 2) * spacing + (Math.random() - 0.5) * 50
-				const defaultY = centerY + (row - gridSize / 2) * spacing + (Math.random() - 0.5) * 50
-
-				const customPos = nodePositions.get(doc.id)
-
-				// Check if node exists in cache (preserves d3-force mutations)
-				let node = nodeCache.current.get(doc.id)
-				if (node) {
-					// Update existing node's data, preserve physics properties (x, y, vx, vy, fx, fy)
-					node.data = doc
-					node.isDragging = draggingNodeId === doc.id
-					// Don't reset x/y - they're managed by d3-force
-				} else {
-					// Create new node with initial position
-					node = {
-						id: doc.id,
-						type: "document",
-						x: customPos?.x ?? defaultX,
-						y: customPos?.y ?? defaultY,
-						data: doc,
-						size: 58,
-						color: colors.document.primary,
+					const memOffset = getMemoryOrbitOffset(i, memCount, mem.id)
+					memNode = {
+						id: mem.id,
+						type: "memory",
+						x: docNode.x + memOffset.x,
+						y: docNode.y + memOffset.y,
+						data: memData,
+						size: 36,
+						borderColor: getMemoryNodeBorderColor(mem, colors, cluster?.color),
+						clusterKey: cluster?.key ?? null,
+						clusterColor: cluster?.color ?? null,
 						isHovered: false,
-						isDragging: draggingNodeId === doc.id,
-					} satisfies GraphNode
-					nodeCache.current.set(doc.id, node)
-				}
-
-				documentNodes.push(node)
-			})
-
-			spaceIndex++
-		})
-
-		/* 2. Manual collision avoidance removed - now handled by d3-force simulation */
-		// The initial circular layout provides good starting positions
-		// D3-force will handle collision avoidance and spacing dynamically
-
-		allNodes.push(...documentNodes)
-		
-		/* 3. Add memories around documents WITH doc-memory connections */
-		documentNodes.forEach((docNode) => {
-			const memoryNodeMap = new Map<string, GraphNode>()
-			const doc = docNode.data as DocumentWithMemories
-
-			doc.memoryEntries.forEach((memory, memIndex) => {
-				const memoryId = `${memory.id}`
-				const customMemPos = nodePositions.get(memoryId)
-
-				// Simple circular positioning around parent doc
-				// Physics will naturally cluster them better
-				const angle = (memIndex / doc.memoryEntries.length) * Math.PI * 2
-				const distance = clusterRadius * 1 // Closer to parent, let physics separate
-
-				const defaultMemX = docNode.x + Math.cos(angle) * distance
-				const defaultMemY = docNode.y + Math.sin(angle) * distance
-
-				// Calculate final position
-				let finalMemX = defaultMemX
-				let finalMemY = defaultMemY
-
-				if (customMemPos) {
-					// If memory was manually positioned and has stored offset relative to parent
-					if (customMemPos.parentDocId === docNode.id &&
-						customMemPos.offsetX !== undefined &&
-						customMemPos.offsetY !== undefined) {
-						// Apply the stored offset to the current document position
-						finalMemX = docNode.x + customMemPos.offsetX
-						finalMemY = docNode.y + customMemPos.offsetY
-					} else {
-						// Fallback: use absolute position (for backward compatibility or if parent changed)
-						finalMemX = customMemPos.x
-						finalMemY = customMemPos.y
+						isDragging: false,
+					}
+					if (appendSpatialGrid) {
+						appendPlacementNodes.push(memNode)
+						addAppendSpatialNode(appendSpatialGrid, memNode)
 					}
 				}
-
-				if (!memoryNodeMap.has(memoryId)) {
-					// Check if memory node exists in cache (preserves d3-force mutations)
-					let memoryNode = nodeCache.current.get(memoryId)
-					if (memoryNode) {
-						// Update existing node's data, preserve physics properties
-						memoryNode.data = memory
-						memoryNode.isDragging = draggingNodeId === memoryId
-						// Don't reset x/y - they're managed by d3-force
-					} else {
-						// Create new node with initial position
-						memoryNode = {
-							id: memoryId,
-							type: "memory",
-							x: finalMemX,
-							y: finalMemY,
-							data: memory,
-							size: Math.max(
-								32,
-								Math.min(48, (memory.memory?.length || 50) * 0.5),
-							),
-							color: colors.memory.primary,
-							isHovered: false,
-							isDragging: draggingNodeId === memoryId,
-						}
-						nodeCache.current.set(memoryId, memoryNode)
-					}
-					memoryNodeMap.set(memoryId, memoryNode)
-					allNodes.push(memoryNode)
-				}
-
-				// Create doc-memory edge with similarity
-				allEdges.push({
-					id: `edge-${docNode.id}-${memory.id}`,
-					source: docNode.id,
-					target: memoryId,
-					similarity: 1,
-					visualProps: getConnectionVisualProps(1),
-					color: colors.connection.memory,
-					edgeType: "doc-memory",
-				})
-			})
-		})
-
-		// Build mapping of memoryId -> nodeId for version chains
-		const memNodeIdMap = new Map<string, string>()
-		allNodes.forEach((n) => {
-			if (n.type === "memory") {
-				memNodeIdMap.set((n.data as MemoryEntry).id, n.id)
+				nextCache.set(mem.id, memNode)
+				result.push(memNode)
 			}
-		})
+		}
 
-		// Add version-chain edges (old -> new)
-		data.documents.forEach((doc) => {
-			doc.memoryEntries.forEach((mem: MemoryEntry) => {
-				// Support both new object structure and legacy array/single parent fields
-				let parentRelations: Record<string, MemoryRelation> = (mem.memoryRelations ?? {}) as Record<string, MemoryRelation> 
+		return { nodes: result, cache: nextCache }
+	}, [documents, canvasWidth, canvasHeight, draggingNodeId, colors])
 
-				if (
-					mem.memoryRelations &&
-					Array.isArray(mem.memoryRelations) &&
-					mem.memoryRelations.length > 0
-				) {
-					// Convert array to Record
-					parentRelations = mem.memoryRelations.reduce(
-						(acc, rel) => {
-							acc[rel.targetMemoryId] = rel.relationType
-							return acc
-						},
-						{} as Record<string, MemoryRelation>,
-					)
-				} else if (mem.parentMemoryId) {
-					parentRelations = {
-						[mem.parentMemoryId]: "updates" as MemoryRelation,
-					}
-				}
-				Object.entries(parentRelations).forEach(([pid, relationType]) => {
-					const fromId = memNodeIdMap.get(pid)
-					const toId = memNodeIdMap.get(mem.id)
-					if (fromId && toId) {
-						allEdges.push({
-							id: `version-${fromId}-${toId}`,
-							source: fromId,
-							target: toId,
-							similarity: 1,
-							visualProps: {
-								opacity: 0.8,
-								thickness: 1,
-								glow: 0,
-								pulseDuration: 3000,
-							},
-							// choose color based on relation type
-							color: colors.relations[relationType] ?? colors.relations.updates,
-							edgeType: "version",
-							relationType: relationType as MemoryRelation,
-						})
-					}
-				})
-			})
-		})
+	useEffect(() => {
+		nodeCache.current = graphData.cache
+	}, [graphData.cache])
 
-		// Append similarity edges (calculated in separate memo)
-		allEdges.push(...similarityEdges)
+	const edges = useMemo(() => computeEdges(documents), [documents])
 
-		return { nodes: allNodes, edges: allEdges }
-	}, [data, filteredDocuments, nodePositions, draggingNodeId, similarityEdges])
+	return { nodes: graphData.nodes, edges }
 }

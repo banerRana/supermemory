@@ -25,9 +25,11 @@ export async function handleClaudeMemoryToolCall(
 		projectId?: string
 		memoryContainerTag?: string
 		baseUrl?: string
-	}
+	},
 ) {
-	console.log(`🔧 Handling Claude memory tool call: ${toolUseBlock.input.command}`)
+	console.log(
+		`🔧 Handling Claude memory tool call: ${toolUseBlock.input.command}`,
+	)
 	console.log(`📁 Path: ${toolUseBlock.input.path}`)
 
 	// Initialize memory tool
@@ -50,7 +52,10 @@ export async function handleClaudeMemoryToolCall(
 		is_error: !result.success,
 	}
 
-	console.log(`${result.success ? '✅' : '❌'} Result:`, result.content || result.error)
+	console.log(
+		`${result.success ? "✅" : "❌"} Result:`,
+		result.content || result.error,
+	)
 
 	return toolResult
 }
@@ -60,7 +65,7 @@ export async function handleClaudeMemoryToolCall(
  */
 export async function realClaudeMemoryExample() {
 	console.log("🤖 Real Claude Memory Tool Integration")
-	console.log("=" .repeat(50))
+	console.log("=".repeat(50))
 
 	// Your API keys
 	const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY
@@ -79,14 +84,19 @@ export async function realClaudeMemoryExample() {
 	const initialRequest = {
 		model: "claude-sonnet-4-5",
 		max_tokens: 2048,
-		messages: [{
-			role: "user" as const,
-			content: "I'm working on a Python web scraper that keeps crashing with a timeout error. Here's the problematic function:\\n\\n```python\\ndef fetch_page(url, retries=3):\\n    for i in range(retries):\\n        try:\\n            response = requests.get(url, timeout=5)\\n            return response.text\\n        except requests.exceptions.Timeout:\\n            if i == retries - 1:\\n                raise\\n            time.sleep(1)\\n```\\n\\nPlease help me debug this."
-		}],
-		tools: [{
-			type: "memory_20250818" as const,
-			name: "memory"
-		}]
+		messages: [
+			{
+				role: "user" as const,
+				content:
+					"I'm working on a Python web scraper that keeps crashing with a timeout error. Here's the problematic function:\\n\\n```python\\ndef fetch_page(url, retries=3):\\n    for i in range(retries):\\n        try:\\n            response = requests.get(url, timeout=5)\\n            return response.text\\n        except requests.exceptions.Timeout:\\n            if i == retries - 1:\\n                raise\\n            time.sleep(1)\\n```\\n\\nPlease help me debug this.",
+			},
+		],
+		tools: [
+			{
+				type: "memory_20250818" as const,
+				name: "memory",
+			},
+		],
 	}
 
 	// Make the API call
@@ -96,9 +106,9 @@ export async function realClaudeMemoryExample() {
 			"x-api-key": ANTHROPIC_API_KEY,
 			"anthropic-version": "2023-06-01",
 			"content-type": "application/json",
-			"anthropic-beta": "context-management-2025-06-27"
+			"anthropic-beta": "context-management-2025-06-27",
 		},
-		body: JSON.stringify(initialRequest)
+		body: JSON.stringify(initialRequest),
 	})
 
 	const responseData = await claudeResponse.json()
@@ -109,25 +119,31 @@ export async function realClaudeMemoryExample() {
 	const toolResults = []
 
 	if (responseData.content) {
-		for (const block of responseData.content) {
-			if (block.type === "tool_use" && block.name === "memory") {
-				console.log(`\\n🔧 Processing memory tool call:`)
+		const memoryToolCalls = responseData.content.filter(
+			(
+				block: any,
+			): block is {
+				type: "tool_use"
+				id: string
+				name: "memory"
+				input: { command: MemoryCommand; path: string }
+			} => block.type === "tool_use" && block.name === "memory",
+		)
+
+		const results = await Promise.all(
+			memoryToolCalls.map((block: any) => {
+				console.log("\n🔧 Processing memory tool call:")
 				console.log(`Command: ${block.input.command}`)
 				console.log(`Path: ${block.input.path}`)
 
-				// Handle the memory tool call
-				const toolResult = await handleClaudeMemoryToolCall(
-					block,
-					SUPERMEMORY_API_KEY,
-					{
-						projectId: "python-scraper-help",
-						memoryContainerTag: "claude_memory_debug"
-					}
-				)
+				return handleClaudeMemoryToolCall(block, SUPERMEMORY_API_KEY, {
+					projectId: "python-scraper-help",
+					memoryContainerTag: "claude_memory_debug",
+				})
+			}),
+		)
 
-				toolResults.push(toolResult)
-			}
-		}
+		toolResults.push(...results)
 	}
 
 	// Step 3: Send tool results back to Claude if there were any
@@ -141,26 +157,29 @@ export async function realClaudeMemoryExample() {
 				...initialRequest.messages,
 				{
 					role: "assistant" as const,
-					content: responseData.content
+					content: responseData.content,
 				},
 				{
 					role: "user" as const,
-					content: toolResults
-				}
+					content: toolResults,
+				},
 			],
-			tools: initialRequest.tools
+			tools: initialRequest.tools,
 		}
 
-		const followUpResponse = await fetch("https://api.anthropic.com/v1/messages", {
-			method: "POST",
-			headers: {
-				"x-api-key": ANTHROPIC_API_KEY,
-				"anthropic-version": "2023-06-01",
-				"content-type": "application/json",
-				"anthropic-beta": "context-management-2025-06-27"
+		const followUpResponse = await fetch(
+			"https://api.anthropic.com/v1/messages",
+			{
+				method: "POST",
+				headers: {
+					"x-api-key": ANTHROPIC_API_KEY,
+					"anthropic-version": "2023-06-01",
+					"content-type": "application/json",
+					"anthropic-beta": "context-management-2025-06-27",
+				},
+				body: JSON.stringify(followUpRequest),
 			},
-			body: JSON.stringify(followUpRequest)
-		})
+		)
 
 		const followUpData = await followUpResponse.json()
 		console.log("📥 Claude's final response:")
@@ -178,21 +197,29 @@ export async function processClaudeResponse(
 		projectId?: string
 		memoryContainerTag?: string
 		baseUrl?: string
-	}
+	},
 ): Promise<any[]> {
 	const toolResults = []
 
 	if (claudeResponseData.content) {
-		for (const block of claudeResponseData.content) {
-			if (block.type === "tool_use" && block.name === "memory") {
-				const toolResult = await handleClaudeMemoryToolCall(
-					block,
-					supermemoryApiKey,
-					config
-				)
-				toolResults.push(toolResult)
-			}
-		}
+		const memoryToolCalls = claudeResponseData.content.filter(
+			(
+				block: any,
+			): block is {
+				type: "tool_use"
+				id: string
+				name: "memory"
+				input: { command: MemoryCommand; path: string }
+			} => block.type === "tool_use" && block.name === "memory",
+		)
+
+		const results = await Promise.all(
+			memoryToolCalls.map((block: any) =>
+				handleClaudeMemoryToolCall(block, supermemoryApiKey, config),
+			),
+		)
+
+		toolResults.push(...results)
 	}
 
 	return toolResults
@@ -259,7 +286,7 @@ app.post('/chat-with-memory', async (req, res) => {
     res.status(500).json({ error: 'Failed to process chat with memory' });
   }
 });
-`;
+`
 
 // =====================================================
 // Test with actual tool call from your example
@@ -267,7 +294,7 @@ app.post('/chat-with-memory', async (req, res) => {
 
 export async function testWithRealToolCall() {
 	console.log("🧪 Testing with Real Tool Call from Your Example")
-	console.log("=" .repeat(50))
+	console.log("=".repeat(50))
 
 	// This is the actual tool call Claude made in your example
 	const realToolCall = {
@@ -276,8 +303,8 @@ export async function testWithRealToolCall() {
 		name: "memory" as const,
 		input: {
 			command: "view" as const,
-			path: "/memories"
-		}
+			path: "/memories",
+		},
 	}
 
 	console.log("🔍 Tool call from Claude:")
@@ -294,8 +321,8 @@ export async function testWithRealToolCall() {
 		process.env.SUPERMEMORY_API_KEY,
 		{
 			projectId: "python-scraper-debug",
-			memoryContainerTag: "claude_memory_test"
-		}
+			memoryContainerTag: "claude_memory_test",
+		},
 	)
 
 	console.log("\\n📋 Tool Result to send back to Claude:")
@@ -308,12 +335,12 @@ export async function testWithRealToolCall() {
 
 export async function runRealExamples() {
 	console.log("🚀 Running Real Claude Memory Tool Examples")
-	console.log("=" .repeat(70))
+	console.log("=".repeat(70))
 
 	// Test with the actual tool call first
 	await testWithRealToolCall()
 
-	console.log("\\n" + "=".repeat(70) + "\\n")
+	console.log(`\\n${"=".repeat(70)}\\n`)
 
 	// Show web integration example
 	console.log("🌐 Web Framework Integration Example:")
@@ -321,10 +348,12 @@ export async function runRealExamples() {
 
 	// Only run full API example if both keys are present
 	if (process.env.ANTHROPIC_API_KEY && process.env.SUPERMEMORY_API_KEY) {
-		console.log("\\n" + "=".repeat(70) + "\\n")
+		console.log(`\\n${"=".repeat(70)}\\n`)
 		await realClaudeMemoryExample()
 	} else {
-		console.log("\\n⚠️  Set ANTHROPIC_API_KEY and SUPERMEMORY_API_KEY to run full API example")
+		console.log(
+			"\\n⚠️  Set ANTHROPIC_API_KEY and SUPERMEMORY_API_KEY to run full API example",
+		)
 	}
 }
 

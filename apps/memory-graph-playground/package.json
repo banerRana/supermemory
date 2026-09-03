@@ -2,14 +2,17 @@
   "name": "memory-graph-playground",
   "version": "0.1.0",
   "private": true,
+  "portless": { "name": "graph.dev.supermemory", "script": "dev:app" },
   "scripts": {
-    "dev": "next dev",
+    "dev": "portless",
+    "dev:app": "next dev --port ${PORT:-3004}",
     "build": "next build",
+    "check-types": "tsc --noEmit",
     "start": "next start"
   },
   "dependencies": {
     "@supermemory/memory-graph": "workspace:*",
-    "next": "16.0.3",
+    "next": "16.0.7",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },

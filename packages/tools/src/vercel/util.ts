@@ -3,64 +3,32 @@ import type {
 	LanguageModelV2CallOptions,
 	LanguageModelV2Message,
 	LanguageModelV2StreamPart,
-	LanguageModelV3,
-	LanguageModelV3CallOptions,
-	LanguageModelV3Message,
-	LanguageModelV3StreamPart,
 } from "@ai-sdk/provider"
+import { toConversationImageUrl } from "../conversations-client"
 
-// Union types for dual SDK version support (V2 = SDK 5, V3 = SDK 6)
-export type LanguageModel = LanguageModelV2 | LanguageModelV3
-export type LanguageModelCallOptions =
-	| LanguageModelV2CallOptions
-	| LanguageModelV3CallOptions
-export type LanguageModelMessage =
-	| LanguageModelV2Message
-	| LanguageModelV3Message
-export type LanguageModelStreamPart =
-	| LanguageModelV2StreamPart
-	| LanguageModelV3StreamPart
+// Re-export shared types for backward compatibility
+export type {
+	ProfileStructure,
+	ProfileMarkdownData,
+} from "../shared"
 
-/**
- * Response structure from the Supermemory profile API.
- */
-export interface ProfileStructure {
-	profile: {
-		/**
-		 * Core, stable facts about the user that rarely change.
-		 * Examples: name, profession, long-term preferences, goals.
-		 */
-		static?: Array<{ memory: string; metadata?: Record<string, unknown> }>
-		/**
-		 * Recently learned or frequently updated information about the user.
-		 * Examples: current projects, recent interests, ongoing topics.
-		 */
-		dynamic?: Array<{ memory: string; metadata?: Record<string, unknown> }>
-	}
-	searchResults: {
-		/**
-		 * Memories retrieved based on semantic similarity to the current query.
-		 * Most relevant to the immediate conversation context.
-		 */
-		results: Array<{ memory: string; metadata?: Record<string, unknown> }>
-	}
+// Provider v2 does not export V3 names, so keep the public declaration on the
+// common V2 surface and structurally accept V3 models at the wrapper boundary.
+type LanguageModelV3Compat = Omit<
+	LanguageModelV2,
+	"specificationVersion" | "doGenerate" | "doStream"
+> & {
+	readonly specificationVersion: "v3"
+	// biome-ignore lint/suspicious/noExplicitAny: Bridges mutually exclusive provider major declarations.
+	doGenerate(...args: any[]): PromiseLike<any>
+	// biome-ignore lint/suspicious/noExplicitAny: Bridges mutually exclusive provider major declarations.
+	doStream(...args: any[]): PromiseLike<any>
 }
 
-/**
- * Simplified profile data for markdown conversion.
- */
-export interface ProfileMarkdownData {
-	profile: {
-		/** Core, stable user facts (name, preferences, goals) */
-		static?: string[]
-		/** Recently learned or updated information (current projects, interests) */
-		dynamic?: string[]
-	}
-	searchResults: {
-		/** Query-relevant memories based on semantic similarity */
-		results: Array<{ memory: string }>
-	}
-}
+export type LanguageModel = LanguageModelV2 | LanguageModelV3Compat
+export type LanguageModelCallOptions = LanguageModelV2CallOptions
+export type LanguageModelMessage = LanguageModelV2Message
+export type LanguageModelStreamPart = LanguageModelV2StreamPart
 
 export type OutputContentItem =
 	| { type: "text"; text: string }
@@ -79,37 +47,65 @@ export type OutputContentItem =
 			title: string
 	  }
 
-/**
- * Convert profile data to markdown format
- * @param data Profile data with string arrays for static and dynamic memories
- * @returns Markdown string with profile sections
- */
-export function convertProfileToMarkdown(data: ProfileMarkdownData): string {
-	const sections: string[] = []
+// Re-export convertProfileToMarkdown from shared for backward compatibility
+export { convertProfileToMarkdown } from "../shared"
 
-	if (data.profile.static && data.profile.static.length > 0) {
-		sections.push("## Static Profile")
-		sections.push(data.profile.static.map((item) => `- ${item}`).join("\n"))
-	}
-
-	if (data.profile.dynamic && data.profile.dynamic.length > 0) {
-		sections.push("## Dynamic Profile")
-		sections.push(data.profile.dynamic.map((item) => `- ${item}`).join("\n"))
-	}
-
-	return sections.join("\n\n")
-}
-
-export const getLastUserMessage = (params: LanguageModelCallOptions) => {
+export const getLastUserMessage = (
+	params: LanguageModelCallOptions,
+): string | undefined => {
 	const lastUserMessage = params.prompt
 		.slice()
 		.reverse()
 		.find((prompt: LanguageModelMessage) => prompt.role === "user")
-	const memories = lastUserMessage?.content
-		.filter((content) => content.type === "text")
-		.map((content) => (content as { type: "text"; text: string }).text)
+
+	if (!lastUserMessage) {
+		return undefined
+	}
+
+	const content = lastUserMessage.content
+
+	// Handle string content directly
+	if (typeof content === "string") {
+		return content
+	}
+
+	// Handle array content - extract text parts
+	return content
+		.filter((part) => part.type === "text")
+		.map((part) => (part as { type: "text"; text: string }).text)
 		.join(" ")
-	return memories
+}
+
+/** Whether the prompt contains user content that `/v4/conversations` can store. */
+export const hasPersistableUserContent = (
+	params: LanguageModelCallOptions,
+): boolean => {
+	return params.prompt.some((message) => {
+		if (message.role !== "user") return false
+		const content: unknown = message.content
+		if (typeof content === "string") {
+			return Boolean(content.trim())
+		}
+		if (!Array.isArray(content)) return false
+		return content.some((value) => {
+			if (!value || typeof value !== "object") return false
+			const part = value as {
+				type?: unknown
+				text?: unknown
+				mediaType?: unknown
+				data?: unknown
+			}
+			if (part.type === "text" && typeof part.text === "string") {
+				return Boolean(part.text.trim())
+			}
+			return (
+				part.type === "file" &&
+				typeof part.mediaType === "string" &&
+				part.mediaType.startsWith("image/") &&
+				toConversationImageUrl(part.data, part.mediaType) !== null
+			)
+		})
+	})
 }
 
 export const filterOutSupermemories = (content: string) => {

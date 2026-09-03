@@ -1,10 +1,11 @@
-import { cn } from "@lib/utils";
-import { Button } from "@ui/components/button";
+import { cn } from "@lib/utils"
+import { Button } from "@ui/components/button"
 
-interface ExternalAuthButtonProps extends React.ComponentProps<typeof Button> {
-	authProvider: string;
-	authIcon: React.ReactNode;
-}
+export type ExternalAuthButtonProps = React.ComponentProps<"button"> &
+	React.ComponentProps<typeof Button> & {
+		authProvider: string
+		authIcon: React.ReactNode
+	}
 
 export function ExternalAuthButton({
 	authProvider,
@@ -20,8 +21,10 @@ export function ExternalAuthButton({
 			)}
 			style={{
 				borderRadius: "12px",
-				background: "linear-gradient(180deg, #00264F 0%, #001933 100%), linear-gradient(180deg, #0A0E14 0%, #05070A 100%)",
-				boxShadow: "0 1px 2px 0 rgba(0, 43, 87, 0.10), 1px 1px 1px 1px #002B57 inset",
+				background:
+					"linear-gradient(180deg, #00264F 0%, #001933 100%), linear-gradient(180deg, #0A0E14 0%, #05070A 100%)",
+				boxShadow:
+					"0 1px 2px 0 rgba(0, 43, 87, 0.10), 1px 1px 1px 1px #002B57 inset",
 				height: "44px",
 			}}
 			{...props}
@@ -31,5 +34,5 @@ export function ExternalAuthButton({
 				Continue with {authProvider}
 			</span>
 		</Button>
-	);
+	)
 }

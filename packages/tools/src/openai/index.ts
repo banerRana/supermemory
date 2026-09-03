@@ -15,12 +15,13 @@ import {
  * the instructions parameter (appends to existing or creates new instructions).
  *
  * @param openaiClient - The OpenAI client to wrap with SuperMemory middleware
- * @param containerTag - The container tag/identifier for memory search (e.g., user ID, project ID)
- * @param options - Optional configuration options for the middleware
- * @param options.conversationId - Optional conversation ID to group messages into a single document for contextual memory generation
+ * @param options - Configuration options for the middleware
+ * @param options.containerTag - Required. The container tag/identifier for memory search (e.g., user ID, project ID)
+ * @param options.customId - Required. Custom ID to group messages into a single document for contextual memory generation
  * @param options.verbose - Optional flag to enable detailed logging of memory search and injection process (default: false)
  * @param options.mode - Optional mode for memory search: "profile" (default), "query", or "full"
- * @param options.addMemory - Optional mode for memory addition: "always", "never" (default)
+ * @param options.addMemory - Optional mode for memory addition: "always" (default), "never"
+ * @param options.apiKey - Optional Supermemory API key; falls back to SUPERMEMORY_API_KEY
  *
  * @returns An OpenAI client with SuperMemory middleware injected for both Chat Completions and Responses APIs
  *
@@ -33,8 +34,9 @@ import {
  * const openai = new OpenAI({
  *   apiKey: process.env.OPENAI_API_KEY,
  * })
- * const openaiWithSupermemory = withSupermemory(openai, "user-123", {
- *   conversationId: "conversation-456",
+ * const openaiWithSupermemory = withSupermemory(openai, {
+ *   containerTag: "user-123",
+ *   customId: "conversation-456",
  *   mode: "full",
  *   addMemory: "always"
  * })
@@ -55,33 +57,44 @@ import {
  * })
  * ```
  *
- * @throws {Error} When SUPERMEMORY_API_KEY environment variable is not set
+ * @throws {Error} When neither options.apiKey nor SUPERMEMORY_API_KEY is set
  * @throws {Error} When supermemory API request fails
  */
 export function withSupermemory(
 	openaiClient: OpenAI,
-	containerTag: string,
-	options?: OpenAIMiddlewareOptions,
+	options: OpenAIMiddlewareOptions,
 ) {
-	if (!process.env.SUPERMEMORY_API_KEY) {
-		throw new Error("SUPERMEMORY_API_KEY is not set")
+	if (!options.apiKey?.trim() && !process.env.SUPERMEMORY_API_KEY?.trim()) {
+		throw new Error(
+			"SUPERMEMORY_API_KEY is not set — provide it via options.apiKey or set the environment variable",
+		)
 	}
 
-	const conversationId = options?.conversationId
-	const verbose = options?.verbose ?? false
-	const mode = options?.mode ?? "profile"
-	const addMemory = options?.addMemory ?? "never"
-	const baseUrl = options?.baseUrl
+	if (!options.containerTag) {
+		throw new Error(
+			"containerTag is required — provide a non-empty string to identify the user/container",
+		)
+	}
+
+	if (!options.customId) {
+		throw new Error(
+			"customId is required — provide a non-empty string to group messages into a single document",
+		)
+	}
+
+	const { containerTag } = options
+	const verbose = options.verbose ?? false
+	const mode = options.mode ?? "profile"
+	const addMemory = options.addMemory ?? "always"
 
 	const openaiWithSupermemory = createOpenAIMiddleware(
 		openaiClient,
 		containerTag,
 		{
-			conversationId,
+			...options,
 			verbose,
 			mode,
 			addMemory,
-			baseUrl,
 		},
 	)
 
@@ -89,15 +102,33 @@ export function withSupermemory(
 }
 
 export type { OpenAIMiddlewareOptions }
-export type { MemorySearchResult, MemoryAddResult } from "./tools"
+export type {
+	MemorySearchResult,
+	MemoryAddResult,
+	ProfileResult,
+	DocumentListResult,
+	DocumentDeleteResult,
+	DocumentAddResult,
+	MemoryForgetResult,
+} from "./tools"
 export {
 	createSearchMemoriesFunction,
 	createAddMemoryFunction,
+	createGetProfileFunction,
+	createDocumentListFunction,
+	createDocumentDeleteFunction,
+	createDocumentAddFunction,
+	createMemoryForgetFunction,
 	supermemoryTools,
 	getToolDefinitions,
 	createToolCallExecutor,
 	createToolCallsExecutor,
 	createSearchMemoriesTool,
 	createAddMemoryTool,
+	createGetProfileTool,
+	createDocumentListTool,
+	createDocumentDeleteTool,
+	createDocumentAddTool,
+	createMemoryForgetTool,
 	memoryToolSchemas,
 } from "./tools"

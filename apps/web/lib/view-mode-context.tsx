@@ -1,96 +1,90 @@
-"use client";
+"use client"
 
+import { useQueryState } from "nuqs"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { viewParam, type ViewParamValue } from "@/lib/search-params"
 import {
-	createContext,
-	type ReactNode,
-	useContext,
-	useEffect,
-	useState,
-} from "react";
-import { analytics } from "@/lib/analytics";
+	integrationViewToPath,
+	isIntegrationView,
+	pathToIntegrationView,
+} from "@/lib/integration-routes"
+import { isConfigurePath } from "@/lib/configure-routes"
+import { analytics } from "@/lib/analytics"
+import { useCallback, useEffect } from "react"
 
-type ViewMode = "graph" | "list";
+export type ViewMode = ViewParamValue
 
-interface ViewModeContextType {
-	viewMode: ViewMode;
-	setViewMode: (mode: ViewMode) => void;
-	isInitialized: boolean;
-}
+const TRACKED_VIEW_MODES = [
+	"dashboard",
+	"graph",
+	"list",
+	"integrations",
+	"chat",
+	"digests",
+] as const
 
-const ViewModeContext = createContext<ViewModeContextType | undefined>(
-	undefined,
-);
-
-// Cookie utility functions
-const setCookie = (name: string, value: string, days = 365) => {
-	if (typeof document === "undefined") return;
-	const expires = new Date();
-	expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
-	document.cookie = `${name}=${value};expires=${expires.toUTCString()};path=/`;
-};
-
-const getCookie = (name: string): string | null => {
-	if (typeof document === "undefined") return null;
-	const nameEQ = `${name}=`;
-	const ca = document.cookie.split(";");
-	for (let i = 0; i < ca.length; i++) {
-		let c = ca[i];
-		if (!c) continue;
-		while (c.charAt(0) === " ") c = c.substring(1, c.length);
-		if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
-	}
-	return null;
-};
-
-const isMobileDevice = () => {
-	if (typeof window === "undefined") return false;
-	return window.innerWidth < 768;
-};
-
-export function ViewModeProvider({ children }: { children: ReactNode }) {
-	// Start with a default that works for SSR
-	const [viewMode, setViewModeState] = useState<ViewMode>("graph");
-	const [isInitialized, setIsInitialized] = useState(false);
-
-	// Load preferences on the client side
-	useEffect(() => {
-		if (!isInitialized) {
-			// Check for saved preference first
-			const savedMode = getCookie("memoryViewMode");
-			if (savedMode === "list" || savedMode === "graph") {
-				setViewModeState(savedMode);
-			} else {
-				// If no saved preference, default to list on mobile, graph on desktop
-				setViewModeState(isMobileDevice() ? "list" : "graph");
-			}
-			setIsInitialized(true);
-		}
-	}, [isInitialized]);
-
-	// Save to cookie whenever view mode changes
-	const handleSetViewMode = (mode: ViewMode) => {
-		analytics.viewModeChanged(mode);
-		setViewModeState(mode);
-		setCookie("memoryViewMode", mode);
-	};
-
-	return (
-		<ViewModeContext.Provider
-			value={{
-				viewMode,
-				setViewMode: handleSetViewMode,
-				isInitialized,
-			}}
-		>
-			{children}
-		</ViewModeContext.Provider>
-	);
+function isTrackedViewMode(
+	mode: ViewMode,
+): mode is (typeof TRACKED_VIEW_MODES)[number] {
+	return (TRACKED_VIEW_MODES as readonly string[]).includes(mode)
 }
 
 export function useViewMode() {
-	const context = useContext(ViewModeContext);
-	if (!context) {
-		throw new Error("useViewMode must be used within a ViewModeProvider");
-	}
-	return context;
+	const pathname = usePathname()
+	const router = useRouter()
+	const [paramView, setParamView] = useQueryState("view", viewParam)
+
+	// On /integrations[/card] and /configure[/section] the path is the source of truth;
+	// elsewhere the ?view param is.
+	const pathView: ViewMode | null =
+		pathToIntegrationView(pathname) ??
+		(isConfigurePath(pathname) ? "configure" : null)
+	const viewMode: ViewMode = pathView ?? paramView
+
+	const setViewMode = useCallback(
+		(mode: ViewMode) => {
+			if (isTrackedViewMode(mode)) analytics.viewModeChanged(mode)
+			if (isIntegrationView(mode)) {
+				router.push(integrationViewToPath(mode))
+				return
+			}
+			if (mode === "configure") {
+				router.push("/configure")
+				return
+			}
+			// Leaving (or already off) a path-owned route for a param-owned view.
+			if (pathToIntegrationView(pathname) || isConfigurePath(pathname)) {
+				router.push(mode === "dashboard" ? "/" : `/?view=${mode}`)
+				return
+			}
+			void setParamView(mode)
+		},
+		[router, pathname, setParamView],
+	)
+
+	return { viewMode, setViewMode, isInitialized: true }
+}
+
+// Forwards legacy /?view=integrations (and sub-views) and /?view=configure to their
+// canonical routes, preserving any other query params. Call once near the app root.
+export function useLegacyViewRedirect() {
+	const pathname = usePathname()
+	const router = useRouter()
+	const searchParams = useSearchParams()
+
+	useEffect(() => {
+		if (pathname !== "/") return
+		const view = searchParams.get("view")
+		if (!view) return
+		const target = isIntegrationView(view)
+			? integrationViewToPath(view)
+			: view === "configure"
+				? "/configure"
+				: null
+		if (!target) return
+		const params = new URLSearchParams(searchParams.toString())
+		params.delete("view")
+		const qs = params.toString()
+		router.replace(target + (qs ? `?${qs}` : ""))
+	}, [pathname, searchParams, router])
 }

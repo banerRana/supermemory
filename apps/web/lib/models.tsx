@@ -1,27 +1,55 @@
 export const models = [
 	{
-		id: "gpt-5",
-		name: "GPT 5",
+		id: "grok-4.5",
+		name: "Grok 4.5",
+		description: "xAI's latest model",
+	},
+	{
+		id: "gpt-5.6-terra",
+		name: "GPT 5.6",
 		description: "OpenAI's latest model",
 	},
 	{
-		id: "claude-sonnet-4.5",
-		name: "Claude Sonnet 4.5",
+		id: "claude-sonnet-5",
+		name: "Claude Sonnet 5",
 		description: "Anthropic's advanced model",
 	},
 	{
-		id: "gemini-2.5-pro",
-		name: "Gemini 2.5 Pro",
+		id: "gemini-3.1-pro-preview",
+		name: "Gemini 3.1 Pro",
 		description: "Google's most capable model",
 	},
 ] as const
 
 export type ModelId = (typeof models)[number]["id"]
+export type ReasoningEffort = "instant" | "thinking"
 
 export const modelNames: Record<ModelId, { name: string; version: string }> = {
-	"gpt-5": { name: "GPT", version: "5" },
-	"claude-sonnet-4.5": { name: "Claude", version: "4.5" },
-	"gemini-2.5-pro": { name: "Gemini", version: "2.5 Pro" },
+	"grok-4.5": { name: "Grok", version: "4.5" },
+	"gpt-5.6-terra": { name: "GPT", version: "5.6" },
+	"claude-sonnet-5": { name: "Claude", version: "Sonnet 5" },
+	"gemini-3.1-pro-preview": { name: "Gemini", version: "3.1 Pro" },
+}
+
+export const reasoningOptions: Array<{
+	id: ReasoningEffort
+	label: string
+	description: string
+}> = [
+	{
+		id: "instant",
+		label: "Instant",
+		description: "Faster answers for everyday prompts",
+	},
+	{
+		id: "thinking",
+		label: "Thinking",
+		description: "Deeper reasoning for harder questions",
+	},
+]
+
+export function getDefaultReasoningEffort(_model: ModelId): ReasoningEffort {
+	return "instant"
 }
 
 interface ModelIconProps {
